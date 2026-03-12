@@ -185,10 +185,10 @@ export function drawFreehand(
   bh: number,
   scaleFactor: number,
 ) {
-  const points = data.points.map((p) => ({ x: bx + p.x * bw, y: by + p.y * bh }))
-  if (points.length < 2) return
+  const totalPoints = data.strokes.reduce((sum, s) => sum + s.length, 0)
+  if (totalPoints < 2) return
 
-  const drawCount = Math.max(2, Math.floor(points.length * progress))
+  const drawCount = Math.max(2, Math.floor(totalPoints * progress))
 
   ctx.save()
   ctx.strokeStyle = style.color
@@ -197,11 +197,22 @@ export function drawFreehand(
   ctx.lineCap = 'round'
   ctx.lineJoin = 'round'
 
-  ctx.beginPath()
-  ctx.moveTo(points[0].x, points[0].y)
-  for (let i = 1; i < drawCount; i++) {
-    ctx.lineTo(points[i].x, points[i].y)
+  let drawn = 0
+  for (const stroke of data.strokes) {
+    if (drawn >= drawCount) break
+    if (stroke.length === 0) continue
+
+    const pts = stroke.map((p) => ({ x: bx + p.x * bw, y: by + p.y * bh }))
+    const canDraw = Math.min(pts.length, drawCount - drawn)
+
+    ctx.beginPath()
+    ctx.moveTo(pts[0].x, pts[0].y)
+    for (let i = 1; i < canDraw; i++) {
+      ctx.lineTo(pts[i].x, pts[i].y)
+    }
+    ctx.stroke()
+    drawn += canDraw
   }
-  ctx.stroke()
+
   ctx.restore()
 }

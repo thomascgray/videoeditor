@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
-import type { InteractionMode, TimelineObjectType, ArrowData, FreehandData } from '../types'
+import type { InteractionMode, TimelineObjectType, TimelineObject, ArrowData, FreehandData } from '../types'
 import { createTimelineObject } from '../types'
 import { useProject } from '../hooks/useProject'
 import { usePlayback } from '../hooks/usePlayback'
@@ -32,14 +32,17 @@ export default function App() {
     if (!obj) return
     if (obj.type !== 'arrow' && obj.type !== 'freehand') return
 
-    const points = (obj.data as ArrowData | FreehandData).points
-    if (points.length < 2) return
+    // Collect all points (arrows use points, freehand uses strokes)
+    const allPoints = obj.type === 'arrow'
+      ? (obj.data as ArrowData).points
+      : (obj.data as FreehandData).strokes.flat()
+    if (allPoints.length < 2) return
 
     const PADDING = 0.05 // 5% padding in normalized object-local space
 
     // Find extents of points (in object-local 0–1)
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
-    for (const p of points) {
+    for (const p of allPoints) {
       if (p.x < minX) minX = p.x
       if (p.y < minY) minY = p.y
       if (p.x > maxX) maxX = p.x
@@ -62,11 +65,15 @@ export default function App() {
     const newW = (maxX - minX) * obj.width
     const newH = (maxY - minY) * obj.height
 
-    // Renormalize points to the new bbox
-    const newPoints = points.map((p) => ({
+    const renorm = (p: { x: number; y: number }) => ({
       x: (p.x - minX) / (maxX - minX),
       y: (p.y - minY) / (maxY - minY),
-    }))
+    })
+
+    // Renormalize points to the new bbox
+    const newData = obj.type === 'arrow'
+      ? { ...obj.data, points: (obj.data as ArrowData).points.map(renorm) }
+      : { strokes: (obj.data as FreehandData).strokes.map((s) => s.map(renorm)) }
 
     dispatch({
       type: 'UPDATE_OBJECT',
@@ -76,7 +83,7 @@ export default function App() {
         y: newY,
         width: newW,
         height: newH,
-        data: { ...obj.data, points: newPoints },
+        data: newData,
       },
     })
   }, [dispatch])
@@ -97,28 +104,35 @@ export default function App() {
     }
   }, [interactionMode, drawEnabled, handleSetMode])
 
+  // Central helper: assigns each object to a new lane above all existing objects, then dispatches
+  const addObjects = useCallback((objects: TimelineObject[]) => {
+    const maxLane = project.objects.reduce((max, o) => Math.max(max, o.lane), -1)
+    const withLanes = objects.map((obj, i) => ({ ...obj, lane: maxLane + 1 + i }))
+    dispatch({ type: 'ADD_OBJECTS', objects: withLanes })
+    return withLanes
+  }, [project.objects, dispatch])
+
   const handleCreateObject = useCallback((type: TimelineObjectType) => {
     const defaultData: Record<TimelineObjectType, () => ReturnType<typeof createTimelineObject>['data']> = {
       arrow: () => ({ points: [], headSize: 20, curved: false }),
       text: () => ({ content: 'Text' }),
       rectangle: () => ({} as Record<string, never>),
       circle: () => ({} as Record<string, never>),
-      freehand: () => ({ points: [] }),
+      freehand: () => ({ strokes: [] }),
       photo: () => ({ src: '' }),
     }
 
     const obj = createTimelineObject(type, defaultData[type](), {
       startTime: playback.globalTime,
       duration: 5,
-      lane: 0,
       x: type === 'text' ? 0.3 : 0,
       y: type === 'text' ? 0.4 : 0,
       width: type === 'text' ? 0.4 : 1,
       height: type === 'text' ? 0.2 : 1,
     })
 
-    dispatch({ type: 'ADD_OBJECTS', objects: [obj] })
-    setSelectedObjectId(obj.id)
+    const [added] = addObjects([obj])
+    setSelectedObjectId(added.id)
 
     // Auto-enter draw mode for arrow/freehand
     if (type === 'arrow' || type === 'freehand') {
@@ -126,7 +140,7 @@ export default function App() {
     } else {
       handleSetMode('select')
     }
-  }, [playback.globalTime, dispatch, handleSetMode])
+  }, [playback.globalTime, addObjects, handleSetMode])
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -174,16 +188,11 @@ export default function App() {
           className="bg-transparent text-white font-semibold text-sm border-b border-transparent hover:border-gray-600 focus:border-indigo-500 outline-none px-1 py-0.5"
         />
         <div className="flex items-center gap-2">
-          <button
-            onClick={() => setShowImport(true)}
-            className="px-3 py-1.5 text-sm bg-gray-800 hover:bg-gray-700 rounded transition-colors cursor-pointer"
-          >
-            Add Photo
-          </button>
           <AnnotationTools
             interactionMode={interactionMode}
             onSetMode={handleSetMode}
             onCreateObject={handleCreateObject}
+            onAddImage={() => setShowImport(true)}
             drawEnabled={drawEnabled}
           />
           <span className="w-px h-6 bg-gray-700" />
@@ -255,7 +264,7 @@ export default function App() {
       {/* Modals */}
       {showImport && (
         <ImportModal
-          dispatch={dispatch}
+          onImport={addObjects}
           onClose={() => setShowImport(false)}
           insertAtTime={playback.globalTime}
         />

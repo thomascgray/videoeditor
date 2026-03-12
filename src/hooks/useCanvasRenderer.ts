@@ -1,11 +1,13 @@
 import { useEffect, useRef } from 'react'
 import type { TimelineObject, PhotoData } from '../types'
 import { renderFrame, loadImage } from '../lib/renderer'
+import type { EditorOptions } from '../lib/renderer'
 
 export function useCanvasRenderer(
   canvasRef: React.RefObject<HTMLCanvasElement | null>,
   objects: TimelineObject[],
   globalTime: number,
+  editorOptions?: EditorOptions,
 ) {
   const imageCacheRef = useRef<Map<string, HTMLImageElement>>(new Map())
   const renderCountRef = useRef(0)
@@ -41,7 +43,7 @@ export function useCanvasRenderer(
             renderFrame(ctx, objects, globalTime, {
               width: canvas.width,
               height: canvas.height,
-            }, cache)
+            }, cache, editorOptions)
           }
         }
       }
@@ -61,6 +63,6 @@ export function useCanvasRenderer(
     renderFrame(ctx, objects, globalTime, {
       width: canvas.width,
       height: canvas.height,
-    }, imageCacheRef.current)
-  }, [canvasRef, objects, globalTime])
+    }, imageCacheRef.current, editorOptions)
+  }, [canvasRef, objects, globalTime, editorOptions])
 }

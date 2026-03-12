@@ -55,7 +55,7 @@ export type TextData = {
 export type ShapeData = Record<string, never>
 
 export type FreehandData = {
-  points: { x: number; y: number }[]  // 0–1 relative to object's bounding box
+  strokes: { x: number; y: number }[][]  // array of strokes, each stroke is points 0–1 relative to bbox
 }
 
 // === Project ===

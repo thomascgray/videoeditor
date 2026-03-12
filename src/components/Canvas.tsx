@@ -1,6 +1,7 @@
-import { useRef, useEffect, useState, useCallback } from 'react'
+import { useRef, useEffect, useState, useCallback, useMemo } from 'react'
 import type { TimelineObject, InteractionMode, ProjectAction, ArrowData, FreehandData } from '../types'
 import { useCanvasRenderer } from '../hooks/useCanvasRenderer'
+import type { EditorOptions } from '../lib/renderer'
 
 // === Types ===
 
@@ -326,7 +327,12 @@ export default function Canvas({
   const [cursor, setCursor] = useState('default')
   const dragStateRef = useRef<DragState>(null)
 
-  useCanvasRenderer(renderCanvasRef, objects, globalTime)
+  const activeDrawingObjectId = dragState?.kind === 'draw-freehand' ? dragState.objectId : null
+  const editorOpts = useMemo<EditorOptions>(() => ({
+    editorMode: true,
+    activeDrawingObjectId,
+  }), [activeDrawingObjectId])
+  useCanvasRenderer(renderCanvasRef, objects, globalTime, editorOpts)
 
   // Keep dragStateRef in sync for use in event handlers
   dragStateRef.current = dragState
@@ -461,13 +467,13 @@ export default function Canvas({
             updates: { data: { ...data, points: newPoints } },
           })
         } else {
-          // Freehand: mousedown starts a stroke, mousemove adds points
+          // Freehand: mousedown starts a new stroke
           const data = selectedObject.data as FreehandData
-          const newPoints = [...data.points, { x: bx, y: by }]
+          const newStrokes = [...data.strokes, [{ x: bx, y: by }]]
           dispatch({
             type: 'UPDATE_OBJECT_TRANSIENT',
             objectId: selectedObject.id,
-            updates: { data: { ...data, points: newPoints } },
+            updates: { data: { strokes: newStrokes } },
           })
           setDragState({ kind: 'draw-freehand', objectId: selectedObject.id })
         }
@@ -691,11 +697,15 @@ export default function Canvas({
         if (obj) {
           const { bx, by } = normToObjectBbox(nx, ny, obj)
           const data = obj.data as FreehandData
-          const newPoints = [...data.points, { x: bx, y: by }]
+          const lastStroke = data.strokes[data.strokes.length - 1]
+          const newStrokes = [
+            ...data.strokes.slice(0, -1),
+            [...lastStroke, { x: bx, y: by }],
+          ]
           dispatch({
             type: 'UPDATE_OBJECT_TRANSIENT',
             objectId: ds.objectId,
-            updates: { data: { ...data, points: newPoints } },
+            updates: { data: { strokes: newStrokes } },
           })
         }
       }

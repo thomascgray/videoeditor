@@ -33,6 +33,7 @@ type DragState =
   | { kind: 'move'; objectId: string; startMouseX: number; startMouseY: number; originalStartTime: number; originalLane: number }
   | { kind: 'resize-left'; objectId: string; startMouseX: number; originalStartTime: number; originalDuration: number }
   | { kind: 'resize-right'; objectId: string; startMouseX: number; originalDuration: number }
+  | { kind: 'resize-animate-in'; objectId: string; startMouseX: number; originalAnimateIn: number; originalDuration: number }
   | { kind: 'playhead'; startMouseX: number; startTime: number }
 
 export default function Timeline({
@@ -115,17 +116,30 @@ export default function Timeline({
           dragState.originalStartTime + dt,
         ))
         const newDuration = dragState.originalStartTime + dragState.originalDuration - newStart
+        const obj = objects.find((o) => o.id === dragState.objectId)
+        const clampedAnimateIn = obj ? Math.min(obj.animateIn, newDuration) : undefined
         dispatch({
           type: 'UPDATE_OBJECT',
           objectId: dragState.objectId,
-          updates: { startTime: newStart, duration: newDuration },
+          updates: { startTime: newStart, duration: newDuration, ...(clampedAnimateIn !== undefined && { animateIn: clampedAnimateIn }) },
         })
       } else if (dragState.kind === 'resize-right') {
         const newDuration = Math.max(0.1, dragState.originalDuration + dt)
+        const obj = objects.find((o) => o.id === dragState.objectId)
+        const clampedAnimateIn = obj ? Math.min(obj.animateIn, newDuration) : undefined
         dispatch({
           type: 'UPDATE_OBJECT',
           objectId: dragState.objectId,
-          updates: { duration: newDuration },
+          updates: { duration: newDuration, ...(clampedAnimateIn !== undefined && { animateIn: clampedAnimateIn }) },
+        })
+      } else if (dragState.kind === 'resize-animate-in') {
+        const newAnimateIn = Math.max(0.1, dragState.originalAnimateIn + dt)
+        // If animateIn exceeds duration, expand duration to fit
+        const newDuration = Math.max(dragState.originalDuration, newAnimateIn)
+        dispatch({
+          type: 'UPDATE_OBJECT',
+          objectId: dragState.objectId,
+          updates: { animateIn: newAnimateIn, duration: newDuration },
         })
       }
     }
@@ -296,11 +310,66 @@ export default function Timeline({
                     <span className="text-[10px] text-white px-1 truncate leading-[32px] pointer-events-none">
                       {obj.name}
                     </span>
+
+                    {/* AnimateIn sub-bar for drawable types */}
+                    {obj.animateIn > 0 && (obj.type === 'arrow' || obj.type === 'freehand') ? (() => {
+                      // Cap sub-bar so it never covers the parent's resize handles (6px reserved each side)
+                      const pct = (obj.animateIn / obj.duration) * 100
+                      const maxPx = width - 6
+                      return (
+                        <div
+                          className="absolute top-0 left-0 h-full pointer-events-none"
+                          style={{
+                            width: maxPx > 0 ? `min(${pct}%, ${maxPx}px)` : `${pct}%`,
+                          }}
+                        >
+                          <div
+                            className="absolute inset-0 rounded-sm"
+                            style={{
+                              background: 'repeating-linear-gradient(90deg, rgba(255,255,255,0.15) 0px, rgba(255,255,255,0.15) 3px, transparent 3px, transparent 6px)',
+                            }}
+                          />
+                          {/* Drag handle for animateIn right edge */}
+                          {(() => {
+                            const isActive = dragState?.kind === 'resize-animate-in' && dragState.objectId === obj.id
+                            return (
+                              <div
+                                className="absolute right-0 top-0 w-2 h-full cursor-col-resize z-10 pointer-events-auto transition-colors"
+                                style={{
+                                  background: isActive ? 'rgba(251,191,36,0.9)' : 'rgba(251,191,36,0.35)',
+                                }}
+                                onMouseEnter={(e) => { if (!dragState) (e.currentTarget.style.background = 'rgba(251,191,36,0.7)') }}
+                                onMouseLeave={(e) => { if (!isActive) (e.currentTarget.style.background = 'rgba(251,191,36,0.35)') }}
+                                onMouseDown={(e) => {
+                                  e.stopPropagation()
+                                  onSelectObject(obj.id)
+                                  setDragState({
+                                    kind: 'resize-animate-in',
+                                    objectId: obj.id,
+                                    startMouseX: e.clientX,
+                                    originalAnimateIn: obj.animateIn,
+                                    originalDuration: obj.duration,
+                                  })
+                                }}
+                              />
+                            )
+                          })()}
+                        </div>
+                      )
+                    })() : null}
                   </div>
 
                   {/* Right resize handle */}
+                  {(() => {
+                    const isActive = dragState?.kind === 'resize-right' && dragState.objectId === obj.id
+                    return (
                   <div
-                    className="absolute right-0 top-0 w-1.5 h-full cursor-col-resize z-10 hover:bg-white/30"
+                    className="absolute right-0 top-0 w-2 h-full cursor-col-resize z-10 transition-colors"
+                    style={{
+                      background: isActive ? 'rgba(96,165,250,0.9)' : 'rgba(96,165,250,0.25)',
+                    }}
+                    onMouseEnter={(e) => { if (!dragState) (e.currentTarget.style.background = 'rgba(96,165,250,0.6)') }}
+                    onMouseLeave={(e) => { if (!isActive) (e.currentTarget.style.background = 'rgba(96,165,250,0.25)') }}
                     onMouseDown={(e) => {
                       e.stopPropagation()
                       onSelectObject(obj.id)
@@ -312,6 +381,8 @@ export default function Timeline({
                       })
                     }}
                   />
+                    )
+                  })()}
                 </div>
               )
             })}

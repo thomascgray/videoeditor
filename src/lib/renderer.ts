@@ -1,4 +1,4 @@
-import type { TimelineObject, ArrowData, TextData, FreehandData, PhotoData } from '../types'
+import type { TimelineObject, ArrowData, TextData, FreehandData, PhotoData, ObjectStyle } from '../types'
 import {
   drawArrow,
   drawText,
@@ -6,6 +6,13 @@ import {
   drawCircle,
   drawFreehand,
 } from './annotations'
+
+export type EditorOptions = {
+  editorMode?: boolean
+  activeDrawingObjectId?: string | null
+}
+
+const GHOST_ALPHA = 0.25
 
 /**
  * Render a single frame at the given global time.
@@ -17,8 +24,11 @@ export function renderFrame(
   globalTime: number,
   options: { width: number; height: number },
   imageCache: Map<string, HTMLImageElement | ImageBitmap>,
+  editorOptions?: EditorOptions,
 ) {
   const { width: w, height: h } = options
+  const editorMode = editorOptions?.editorMode ?? false
+  const activeDrawingObjectId = editorOptions?.activeDrawingObjectId ?? null
 
   // Black background
   ctx.fillStyle = '#000000'
@@ -35,6 +45,22 @@ export function renderFrame(
       ? Math.min(1, elapsed / obj.animateIn)
       : 1
 
+    // Active drawing object: full opacity, no ghost
+    if (activeDrawingObjectId === obj.id) {
+      drawObject(ctx, obj, 1.0, w, h, imageCache)
+      continue
+    }
+
+    // Ghost preview: two-pass rendering for editor mode
+    if (editorMode && progress < 1 && obj.type !== 'photo') {
+      // Pass 1: ghost of full shape at reduced opacity
+      const ghostStyle = { ...obj.style, opacity: obj.style.opacity * GHOST_ALPHA }
+      drawObject(ctx, obj, 1.0, w, h, imageCache, ghostStyle)
+      // Pass 2: animated portion at full opacity
+      drawObject(ctx, obj, progress, w, h, imageCache)
+      continue
+    }
+
     drawObject(ctx, obj, progress, w, h, imageCache)
   }
 }
@@ -46,7 +72,9 @@ function drawObject(
   w: number,
   h: number,
   imageCache: Map<string, HTMLImageElement | ImageBitmap>,
+  styleOverride?: ObjectStyle,
 ) {
+  const style = styleOverride ?? obj.style
   // Compute bounding box in pixel space
   const bx = obj.x * w
   const by = obj.y * h
@@ -72,25 +100,25 @@ function drawObject(
       const data = obj.data as PhotoData
       const img = imageCache.get(data.src)
       if (img) {
-        ctx.globalAlpha = obj.style.opacity * progress
+        ctx.globalAlpha = style.opacity * progress
         drawImageCover(ctx, img, bx, by, bw, bh)
       }
       break
     }
     case 'arrow':
-      drawArrow(ctx, obj.data as ArrowData, obj.style, progress, bx, by, bw, bh, scaleFactor)
+      drawArrow(ctx, obj.data as ArrowData, style, progress, bx, by, bw, bh, scaleFactor)
       break
     case 'text':
-      drawText(ctx, obj.data as TextData, obj.style, progress, bx, by, bw, bh, scaleFactor)
+      drawText(ctx, obj.data as TextData, style, progress, bx, by, bw, bh, scaleFactor)
       break
     case 'rectangle':
-      drawRectangle(ctx, obj.style, progress, bx, by, bw, bh, scaleFactor)
+      drawRectangle(ctx, style, progress, bx, by, bw, bh, scaleFactor)
       break
     case 'circle':
-      drawCircle(ctx, obj.style, progress, bx, by, bw, bh, scaleFactor)
+      drawCircle(ctx, style, progress, bx, by, bw, bh, scaleFactor)
       break
     case 'freehand':
-      drawFreehand(ctx, obj.data as FreehandData, obj.style, progress, bx, by, bw, bh, scaleFactor)
+      drawFreehand(ctx, obj.data as FreehandData, style, progress, bx, by, bw, bh, scaleFactor)
       break
   }
 
