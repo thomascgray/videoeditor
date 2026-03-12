@@ -24,11 +24,9 @@ export default function App() {
   // Draw mode only enabled when an arrow or freehand object is selected
   const drawEnabled = selectedObject != null && (selectedObject.type === 'arrow' || selectedObject.type === 'freehand')
 
-  // Track the previous interaction mode for tightening on draw→select
-  const prevModeRef = useRef<InteractionMode>(interactionMode)
-
-  // Tighten bounding box when switching from draw → select
-  const tightenBbox = useCallback((obj: typeof selectedObject) => {
+  // Tighten bounding box for drawable objects (arrow/freehand)
+  const tightenBbox = useCallback((objId: string) => {
+    const obj = project.objects.find((o) => o.id === objId)
     if (!obj) return
     if (obj.type !== 'arrow' && obj.type !== 'freehand') return
 
@@ -86,23 +84,34 @@ export default function App() {
         data: newData,
       },
     })
-  }, [dispatch])
+  }, [project.objects, dispatch])
+
+  // Track previous selected object so we can tighten its bbox when selection changes
+  const prevSelectedIdRef = useRef<string | null>(null)
+
+  // Tighten bbox whenever selection moves away from a drawable object
+  useEffect(() => {
+    const prevId = prevSelectedIdRef.current
+    if (prevId && prevId !== selectedObjectId) {
+      tightenBbox(prevId)
+    }
+    prevSelectedIdRef.current = selectedObjectId
+  }, [selectedObjectId, tightenBbox])
 
   const handleSetMode = useCallback((mode: InteractionMode) => {
     // Tighten bbox when leaving draw mode
-    if (prevModeRef.current === 'draw' && mode === 'select' && selectedObject) {
-      tightenBbox(selectedObject)
+    if (interactionMode === 'draw' && mode === 'select' && selectedObjectId) {
+      tightenBbox(selectedObjectId)
     }
-    prevModeRef.current = mode
     setInteractionMode(mode)
-  }, [selectedObject, tightenBbox])
+  }, [interactionMode, selectedObjectId, tightenBbox])
 
   // If draw mode is active but no longer valid, switch back to select
   useEffect(() => {
     if (interactionMode === 'draw' && !drawEnabled) {
-      handleSetMode('select')
+      setInteractionMode('select')
     }
-  }, [interactionMode, drawEnabled, handleSetMode])
+  }, [interactionMode, drawEnabled])
 
   // Central helper: assigns each object to a new lane above all existing objects, then dispatches
   const addObjects = useCallback((objects: TimelineObject[]) => {
