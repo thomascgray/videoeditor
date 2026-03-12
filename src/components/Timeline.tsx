@@ -30,7 +30,7 @@ const TYPE_COLORS: Record<string, string> = {
 
 type DragState =
   | null
-  | { kind: 'move'; objectId: string; startMouseX: number; originalStartTime: number }
+  | { kind: 'move'; objectId: string; startMouseX: number; startMouseY: number; originalStartTime: number; originalLane: number }
   | { kind: 'resize-left'; objectId: string; startMouseX: number; originalStartTime: number; originalDuration: number }
   | { kind: 'resize-right'; objectId: string; startMouseX: number; originalDuration: number }
   | { kind: 'playhead'; startMouseX: number; startTime: number }
@@ -48,9 +48,13 @@ export default function Timeline({
   const [pixelsPerSecond, setPixelsPerSecond] = useState(DEFAULT_PIXELS_PER_SECOND)
   const [dragState, setDragState] = useState<DragState>(null)
 
-  // Compute lanes: group objects by their lane property
-  const maxLane = objects.reduce((max, obj) => Math.max(max, obj.lane), -1)
-  const laneCount = Math.max(maxLane + 1, 1)
+  // Compute lanes: objects can have any integer lane (including negative)
+  const minLane = objects.reduce((min, obj) => Math.min(min, obj.lane), 0)
+  const maxLane = objects.reduce((max, obj) => Math.max(max, obj.lane), 0)
+  // During a move drag, show an extra lane above for "new lane" drop zone
+  const isDraggingMove = dragState?.kind === 'move'
+  // Add drop zones above and below during drag
+  const laneCount = Math.max(maxLane - minLane + 1, 1) + (isDraggingMove ? 2 : 0)
 
   const viewDuration = Math.max(totalDuration + TIMELINE_PADDING_SECONDS, 10)
   const timelineWidth = viewDuration * pixelsPerSecond
@@ -96,10 +100,14 @@ export default function Timeline({
         onSeek(Math.max(0, dragState.startTime + dt))
       } else if (dragState.kind === 'move') {
         const newStart = Math.max(0, dragState.originalStartTime + dt)
+        // Calculate target lane from vertical mouse movement (no clamp — negative lanes are fine)
+        const dy = e.clientY - dragState.startMouseY
+        const laneDelta = Math.round(-dy / (LANE_HEIGHT + LANE_GAP))
+        const targetLane = dragState.originalLane + laneDelta
         dispatch({
-          type: 'UPDATE_OBJECT',
+          type: 'UPDATE_OBJECT_TRANSIENT',
           objectId: dragState.objectId,
-          updates: { startTime: newStart },
+          updates: { startTime: newStart, lane: targetLane },
         })
       } else if (dragState.kind === 'resize-left') {
         const newStart = Math.max(0, Math.min(
@@ -123,6 +131,9 @@ export default function Timeline({
     }
 
     const handleMouseUp = () => {
+      if (dragState.kind === 'move') {
+        dispatch({ type: 'COMMIT_TRANSIENT' })
+      }
       setDragState(null)
     }
 
@@ -201,24 +212,35 @@ export default function Timeline({
             }}
           >
             {/* Lane backgrounds */}
-            {Array.from({ length: laneCount }, (_, lane) => (
-              <div
-                key={lane}
-                className="absolute w-full"
-                style={{
-                  top: (laneCount - 1 - lane) * (LANE_HEIGHT + LANE_GAP) + LANE_GAP,
-                  height: LANE_HEIGHT,
-                  background: lane % 2 === 0 ? 'rgba(255,255,255,0.02)' : 'transparent',
-                }}
-              />
-            ))}
+            {Array.from({ length: laneCount }, (_, i) => {
+              const isTopDropZone = isDraggingMove && i === laneCount - 1
+              const isBottomDropZone = isDraggingMove && i === 0
+              const isDropZone = isTopDropZone || isBottomDropZone
+              return (
+                <div
+                  key={i}
+                  className="absolute w-full"
+                  style={{
+                    top: (laneCount - 1 - i) * (LANE_HEIGHT + LANE_GAP) + LANE_GAP,
+                    height: LANE_HEIGHT,
+                    background: isDropZone
+                      ? 'rgba(59, 130, 246, 0.15)'
+                      : i % 2 === 0 ? 'rgba(255,255,255,0.02)' : 'transparent',
+                    borderTop: isDropZone ? '1px dashed rgba(59, 130, 246, 0.5)' : 'none',
+                    borderBottom: isDropZone ? '1px dashed rgba(59, 130, 246, 0.5)' : 'none',
+                  }}
+                />
+              )
+            })}
 
             {/* Object bars */}
             {objects.map((obj) => {
               const left = timeToX(obj.startTime)
               const width = Math.max(timeToX(obj.duration), 4)
               // Higher lane = higher in the panel (visually higher = foreground)
-              const top = (laneCount - 1 - obj.lane) * (LANE_HEIGHT + LANE_GAP) + LANE_GAP
+              // Map lane number to visual index: lane minLane = index 0 (bottom)
+              const laneIndex = obj.lane - minLane + (isDraggingMove ? 1 : 0)
+              const top = (laneCount - 1 - laneIndex) * (LANE_HEIGHT + LANE_GAP) + LANE_GAP
               const color = TYPE_COLORS[obj.type] ?? '#666'
               const isSelected = obj.id === selectedObjectId
 
@@ -265,7 +287,9 @@ export default function Timeline({
                         kind: 'move',
                         objectId: obj.id,
                         startMouseX: e.clientX,
+                        startMouseY: e.clientY,
                         originalStartTime: obj.startTime,
+                        originalLane: obj.lane,
                       })
                     }}
                   >

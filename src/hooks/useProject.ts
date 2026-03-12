@@ -6,6 +6,8 @@ type UndoableState = {
   past: Project[]
   present: Project
   future: Project[]
+  /** Snapshot saved on first transient update, used for undo entry on commit */
+  transientSnapshot: Project | null
 }
 
 function projectReducer(state: UndoableState, action: ProjectAction): UndoableState {
@@ -16,6 +18,7 @@ function projectReducer(state: UndoableState, action: ProjectAction): UndoableSt
       past: state.past.slice(0, -1),
       present: previous,
       future: [state.present, ...state.future],
+      transientSnapshot: null,
     }
   }
 
@@ -26,6 +29,31 @@ function projectReducer(state: UndoableState, action: ProjectAction): UndoableSt
       past: [...state.past, state.present],
       present: next,
       future: state.future.slice(1),
+      transientSnapshot: null,
+    }
+  }
+
+  if (action.type === 'UPDATE_OBJECT_TRANSIENT') {
+    const newProject = applyAction(state.present, {
+      type: 'UPDATE_OBJECT',
+      objectId: action.objectId,
+      updates: action.updates,
+    })
+    if (newProject === state.present) return state
+    return {
+      ...state,
+      present: newProject,
+      transientSnapshot: state.transientSnapshot ?? state.present,
+    }
+  }
+
+  if (action.type === 'COMMIT_TRANSIENT') {
+    if (!state.transientSnapshot) return state
+    return {
+      past: [...state.past.slice(-49), state.transientSnapshot],
+      present: state.present,
+      future: [],
+      transientSnapshot: null,
     }
   }
 
@@ -36,6 +64,7 @@ function projectReducer(state: UndoableState, action: ProjectAction): UndoableSt
     past: [...state.past.slice(-49), state.present],
     present: newProject,
     future: [],
+    transientSnapshot: null,
   }
 }
 
@@ -86,6 +115,7 @@ export function useProject() {
     past: [],
     present: loadProject(),
     future: [],
+    transientSnapshot: null,
   }))
 
   // Auto-save (debounced)

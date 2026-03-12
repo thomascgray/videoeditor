@@ -1,11 +1,19 @@
 import type { TimelineObject, ProjectAction } from '../types'
 
 type PropertiesPanelProps = {
-  object: TimelineObject
+  object: TimelineObject | null
   dispatch: React.Dispatch<ProjectAction>
 }
 
 export default function PropertiesPanel({ object: obj, dispatch }: PropertiesPanelProps) {
+  if (!obj) {
+    return (
+      <div className="w-64 bg-gray-900 border-l border-gray-700 p-4 overflow-y-auto text-sm">
+        <p className="text-gray-500 text-xs">No object selected</p>
+      </div>
+    )
+  }
+
   const update = (updates: Partial<Omit<TimelineObject, 'id' | 'type'>>) => {
     dispatch({ type: 'UPDATE_OBJECT', objectId: obj.id, updates })
   }
@@ -59,6 +67,13 @@ export default function PropertiesPanel({ object: obj, dispatch }: PropertiesPan
             <NumberInput value={obj.height} step={0.01} min={0.01} onChange={(v) => update({ height: v })} />
           </Field>
         </div>
+        <Field label="Rotation">
+          <NumberInput
+            value={Math.round(obj.rotation * 180 / Math.PI * 10) / 10}
+            step={1}
+            onChange={(v) => update({ rotation: v * Math.PI / 180 })}
+          />
+        </Field>
       </Section>
 
       {/* Style (for non-photo objects) */}

@@ -1,19 +1,22 @@
-import type { ArrowData, TextData, ShapeData, FreehandData, ObjectStyle } from '../types'
+import type { ArrowData, TextData, FreehandData, ObjectStyle } from '../types'
 
 export function drawArrow(
   ctx: CanvasRenderingContext2D,
   data: ArrowData,
   style: ObjectStyle,
   progress: number,
-  w: number,
-  h: number,
+  bx: number,
+  by: number,
+  bw: number,
+  bh: number,
+  scaleFactor: number,
 ) {
-  const points = data.points.map((p) => ({ x: p.x * w, y: p.y * h }))
+  const points = data.points.map((p) => ({ x: bx + p.x * bw, y: by + p.y * bh }))
   if (points.length < 2) return
 
   ctx.save()
   ctx.strokeStyle = style.color
-  ctx.lineWidth = style.lineWidth
+  ctx.lineWidth = style.lineWidth * scaleFactor
   ctx.globalAlpha = style.opacity
   ctx.lineCap = 'round'
   ctx.lineJoin = 'round'
@@ -62,7 +65,7 @@ export function drawArrow(
 
   // Draw arrowhead when progress > 0.95
   if (progress > 0.95) {
-    const headSize = data.headSize * (style.lineWidth / 4)
+    const headSize = data.headSize * (style.lineWidth * scaleFactor / 4)
     ctx.beginPath()
     ctx.moveTo(endPoint.x, endPoint.y)
     ctx.lineTo(
@@ -85,12 +88,13 @@ export function drawText(
   data: TextData,
   style: ObjectStyle,
   progress: number,
-  w: number,
-  h: number,
+  bx: number,
+  by: number,
+  bw: number,
+  bh: number,
+  scaleFactor: number,
 ) {
-  const x = data.x * w
-  const y = data.y * h
-  const fontSize = style.fontSize ?? 32
+  const fontSize = (style.fontSize ?? 32) * scaleFactor
 
   ctx.save()
   ctx.globalAlpha = style.opacity * progress
@@ -98,64 +102,71 @@ export function drawText(
 
   const visibleText = data.content.substring(0, Math.floor(progress * data.content.length) || data.content.length)
 
+  // Text is drawn centered in the bounding box
+  const x = bx + bw / 2
+  const y = by + bh / 2
+
   // Draw background if specified
   if (data.background) {
     const metrics = ctx.measureText(visibleText)
-    const padding = data.padding ?? 8
+    const padding = (data.padding ?? 8) * scaleFactor
     ctx.fillStyle = data.background
     ctx.fillRect(
-      x - padding,
-      y - fontSize - padding,
+      x - metrics.width / 2 - padding,
+      y - fontSize / 2 - padding,
       metrics.width + padding * 2,
       fontSize + padding * 2,
     )
   }
 
   ctx.fillStyle = style.color
-  ctx.textBaseline = 'alphabetic'
+  ctx.textBaseline = 'middle'
+  ctx.textAlign = 'center'
   ctx.fillText(visibleText, x, y)
   ctx.restore()
 }
 
 export function drawRectangle(
   ctx: CanvasRenderingContext2D,
-  data: ShapeData,
   style: ObjectStyle,
   progress: number,
-  w: number,
-  h: number,
+  bx: number,
+  by: number,
+  bw: number,
+  bh: number,
+  scaleFactor: number,
 ) {
   ctx.save()
   ctx.strokeStyle = style.color
-  ctx.lineWidth = style.lineWidth
+  ctx.lineWidth = style.lineWidth * scaleFactor
   ctx.globalAlpha = style.opacity * progress
 
-  const x = data.x * w
-  const y = data.y * h
-  const rw = data.width * w * progress
-  const rh = data.height * h * progress
+  const rw = bw * progress
+  const rh = bh * progress
 
-  ctx.strokeRect(x, y, rw, rh)
+  ctx.strokeRect(bx, by, rw, rh)
   ctx.restore()
 }
 
 export function drawCircle(
   ctx: CanvasRenderingContext2D,
-  data: ShapeData,
   style: ObjectStyle,
   progress: number,
-  w: number,
-  h: number,
+  bx: number,
+  by: number,
+  bw: number,
+  bh: number,
+  scaleFactor: number,
 ) {
   ctx.save()
   ctx.strokeStyle = style.color
-  ctx.lineWidth = style.lineWidth
+  ctx.lineWidth = style.lineWidth * scaleFactor
   ctx.globalAlpha = style.opacity * progress
 
-  const cx = (data.x + data.width / 2) * w
-  const cy = (data.y + data.height / 2) * h
-  const rx = (data.width / 2) * w
-  const ry = (data.height / 2) * h
+  const cx = bx + bw / 2
+  const cy = by + bh / 2
+  const rx = bw / 2
+  const ry = bh / 2
 
   ctx.beginPath()
   ctx.ellipse(cx, cy, rx * progress, ry * progress, 0, 0, Math.PI * 2)
@@ -168,17 +179,20 @@ export function drawFreehand(
   data: FreehandData,
   style: ObjectStyle,
   progress: number,
-  w: number,
-  h: number,
+  bx: number,
+  by: number,
+  bw: number,
+  bh: number,
+  scaleFactor: number,
 ) {
-  const points = data.points.map((p) => ({ x: p.x * w, y: p.y * h }))
+  const points = data.points.map((p) => ({ x: bx + p.x * bw, y: by + p.y * bh }))
   if (points.length < 2) return
 
   const drawCount = Math.max(2, Math.floor(points.length * progress))
 
   ctx.save()
   ctx.strokeStyle = style.color
-  ctx.lineWidth = style.lineWidth
+  ctx.lineWidth = style.lineWidth * scaleFactor
   ctx.globalAlpha = style.opacity
   ctx.lineCap = 'round'
   ctx.lineJoin = 'round'

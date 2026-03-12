@@ -15,6 +15,7 @@ export type TimelineObject = {
   y: number
   width: number
   height: number
+  rotation: number        // radians, rotation around center of bounding box
 
   // Animation
   animateIn: number       // seconds for draw-on animation (0 = instant)
@@ -40,28 +41,21 @@ export type PhotoData = {
 }
 
 export type ArrowData = {
-  points: { x: number; y: number }[]
+  points: { x: number; y: number }[]  // 0–1 relative to object's bounding box
   headSize: number
   curved: boolean
 }
 
 export type TextData = {
-  x: number
-  y: number
   content: string
   background?: string
   padding?: number
 }
 
-export type ShapeData = {
-  x: number
-  y: number
-  width: number
-  height: number
-}
+export type ShapeData = Record<string, never>
 
 export type FreehandData = {
-  points: { x: number; y: number }[]
+  points: { x: number; y: number }[]  // 0–1 relative to object's bounding box
 }
 
 // === Project ===
@@ -75,9 +69,9 @@ export type Project = {
   objects: TimelineObject[]
 }
 
-// === Tools ===
+// === Interaction Modes ===
 
-export type AnnotationTool = 'select' | 'arrow' | 'text' | 'rectangle' | 'circle' | 'freehand'
+export type InteractionMode = 'select' | 'draw'
 
 // === Actions ===
 
@@ -87,6 +81,8 @@ export type ProjectAction =
   | { type: 'ADD_OBJECTS'; objects: TimelineObject[] }
   | { type: 'REMOVE_OBJECT'; objectId: string }
   | { type: 'UPDATE_OBJECT'; objectId: string; updates: Partial<Omit<TimelineObject, 'id' | 'type'>> }
+  | { type: 'UPDATE_OBJECT_TRANSIENT'; objectId: string; updates: Partial<Omit<TimelineObject, 'id' | 'type'>> }
+  | { type: 'COMMIT_TRANSIENT' }
   | { type: 'DUPLICATE_OBJECT'; objectId: string }
   | { type: 'UNDO' }
   | { type: 'REDO' }
@@ -117,6 +113,7 @@ export function createTimelineObject(
     y?: number
     width?: number
     height?: number
+    rotation?: number
     animateIn?: number
     style?: Partial<ObjectStyle>
     name?: string
@@ -136,6 +133,7 @@ export function createTimelineObject(
     y: options?.y ?? 0,
     width: options?.width ?? 1,
     height: options?.height ?? 1,
+    rotation: options?.rotation ?? 0,
     animateIn: options?.animateIn ?? (type === 'photo' ? 0 : 1),
     style: {
       color: '#FF0000',

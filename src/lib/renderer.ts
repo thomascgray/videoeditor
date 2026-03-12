@@ -1,4 +1,4 @@
-import type { TimelineObject, ArrowData, TextData, ShapeData, FreehandData, PhotoData } from '../types'
+import type { TimelineObject, ArrowData, TextData, FreehandData, PhotoData } from '../types'
 import {
   drawArrow,
   drawText,
@@ -47,38 +47,54 @@ function drawObject(
   h: number,
   imageCache: Map<string, HTMLImageElement | ImageBitmap>,
 ) {
+  // Compute bounding box in pixel space
+  const bx = obj.x * w
+  const by = obj.y * h
+  const bw = obj.width * w
+  const bh = obj.height * h
+  const cx = bx + bw / 2
+  const cy = by + bh / 2
+
+  // Scale factor for lineWidth/fontSize: sqrt(area ratio) relative to full canvas
+  const scaleFactor = Math.sqrt((bw * bh) / (w * h))
+
+  ctx.save()
+
+  // Apply rotation around bounding box center
+  if (obj.rotation !== 0) {
+    ctx.translate(cx, cy)
+    ctx.rotate(obj.rotation)
+    ctx.translate(-cx, -cy)
+  }
+
   switch (obj.type) {
     case 'photo': {
       const data = obj.data as PhotoData
       const img = imageCache.get(data.src)
       if (img) {
-        const px = obj.x * w
-        const py = obj.y * h
-        const pw = obj.width * w
-        const ph = obj.height * h
-        ctx.save()
         ctx.globalAlpha = obj.style.opacity * progress
-        drawImageCover(ctx, img, px, py, pw, ph)
-        ctx.restore()
+        drawImageCover(ctx, img, bx, by, bw, bh)
       }
       break
     }
     case 'arrow':
-      drawArrow(ctx, obj.data as ArrowData, obj.style, progress, w, h)
+      drawArrow(ctx, obj.data as ArrowData, obj.style, progress, bx, by, bw, bh, scaleFactor)
       break
     case 'text':
-      drawText(ctx, obj.data as TextData, obj.style, progress, w, h)
+      drawText(ctx, obj.data as TextData, obj.style, progress, bx, by, bw, bh, scaleFactor)
       break
     case 'rectangle':
-      drawRectangle(ctx, obj.data as ShapeData, obj.style, progress, w, h)
+      drawRectangle(ctx, obj.style, progress, bx, by, bw, bh, scaleFactor)
       break
     case 'circle':
-      drawCircle(ctx, obj.data as ShapeData, obj.style, progress, w, h)
+      drawCircle(ctx, obj.style, progress, bx, by, bw, bh, scaleFactor)
       break
     case 'freehand':
-      drawFreehand(ctx, obj.data as FreehandData, obj.style, progress, w, h)
+      drawFreehand(ctx, obj.data as FreehandData, obj.style, progress, bx, by, bw, bh, scaleFactor)
       break
   }
+
+  ctx.restore()
 }
 
 /**

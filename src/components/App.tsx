@@ -1,5 +1,6 @@
-import { useState, useCallback, useEffect } from 'react'
-import type { AnnotationTool } from '../types'
+import { useState, useCallback, useEffect, useRef } from 'react'
+import type { InteractionMode, TimelineObjectType, ArrowData, FreehandData } from '../types'
+import { createTimelineObject } from '../types'
 import { useProject } from '../hooks/useProject'
 import { usePlayback } from '../hooks/usePlayback'
 import Canvas from './Canvas'
@@ -13,12 +14,119 @@ export default function App() {
   const { project, dispatch, canUndo, canRedo, undo, redo } = useProject()
   const playback = usePlayback(project)
 
-  const [activeTool, setActiveTool] = useState<AnnotationTool>('select')
+  const [interactionMode, setInteractionMode] = useState<InteractionMode>('select')
   const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null)
   const [showImport, setShowImport] = useState(false)
   const [showExport, setShowExport] = useState(false)
 
   const selectedObject = project.objects.find((o) => o.id === selectedObjectId) ?? null
+
+  // Draw mode only enabled when an arrow or freehand object is selected
+  const drawEnabled = selectedObject != null && (selectedObject.type === 'arrow' || selectedObject.type === 'freehand')
+
+  // Track the previous interaction mode for tightening on draw→select
+  const prevModeRef = useRef<InteractionMode>(interactionMode)
+
+  // Tighten bounding box when switching from draw → select
+  const tightenBbox = useCallback((obj: typeof selectedObject) => {
+    if (!obj) return
+    if (obj.type !== 'arrow' && obj.type !== 'freehand') return
+
+    const points = (obj.data as ArrowData | FreehandData).points
+    if (points.length < 2) return
+
+    const PADDING = 0.05 // 5% padding in normalized object-local space
+
+    // Find extents of points (in object-local 0–1)
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+    for (const p of points) {
+      if (p.x < minX) minX = p.x
+      if (p.y < minY) minY = p.y
+      if (p.x > maxX) maxX = p.x
+      if (p.y > maxY) maxY = p.y
+    }
+
+    // Add padding
+    const rangeX = maxX - minX || 0.01
+    const rangeY = maxY - minY || 0.01
+    const padX = rangeX * PADDING
+    const padY = rangeY * PADDING
+    minX -= padX
+    minY -= padY
+    maxX += padX
+    maxY += padY
+
+    // Compute new bbox in canvas-normalized coords
+    const newX = obj.x + minX * obj.width
+    const newY = obj.y + minY * obj.height
+    const newW = (maxX - minX) * obj.width
+    const newH = (maxY - minY) * obj.height
+
+    // Renormalize points to the new bbox
+    const newPoints = points.map((p) => ({
+      x: (p.x - minX) / (maxX - minX),
+      y: (p.y - minY) / (maxY - minY),
+    }))
+
+    dispatch({
+      type: 'UPDATE_OBJECT',
+      objectId: obj.id,
+      updates: {
+        x: newX,
+        y: newY,
+        width: newW,
+        height: newH,
+        data: { ...obj.data, points: newPoints },
+      },
+    })
+  }, [dispatch])
+
+  const handleSetMode = useCallback((mode: InteractionMode) => {
+    // Tighten bbox when leaving draw mode
+    if (prevModeRef.current === 'draw' && mode === 'select' && selectedObject) {
+      tightenBbox(selectedObject)
+    }
+    prevModeRef.current = mode
+    setInteractionMode(mode)
+  }, [selectedObject, tightenBbox])
+
+  // If draw mode is active but no longer valid, switch back to select
+  useEffect(() => {
+    if (interactionMode === 'draw' && !drawEnabled) {
+      handleSetMode('select')
+    }
+  }, [interactionMode, drawEnabled, handleSetMode])
+
+  const handleCreateObject = useCallback((type: TimelineObjectType) => {
+    const defaultData: Record<TimelineObjectType, () => ReturnType<typeof createTimelineObject>['data']> = {
+      arrow: () => ({ points: [], headSize: 20, curved: false }),
+      text: () => ({ content: 'Text' }),
+      rectangle: () => ({} as Record<string, never>),
+      circle: () => ({} as Record<string, never>),
+      freehand: () => ({ points: [] }),
+      photo: () => ({ src: '' }),
+    }
+
+    const obj = createTimelineObject(type, defaultData[type](), {
+      startTime: playback.globalTime,
+      duration: 5,
+      lane: 0,
+      x: type === 'text' ? 0.3 : 0,
+      y: type === 'text' ? 0.4 : 0,
+      width: type === 'text' ? 0.4 : 1,
+      height: type === 'text' ? 0.2 : 1,
+    })
+
+    dispatch({ type: 'ADD_OBJECTS', objects: [obj] })
+    setSelectedObjectId(obj.id)
+
+    // Auto-enter draw mode for arrow/freehand
+    if (type === 'arrow' || type === 'freehand') {
+      handleSetMode('draw')
+    } else {
+      handleSetMode('select')
+    }
+  }, [playback.globalTime, dispatch, handleSetMode])
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -28,16 +136,12 @@ export default function App() {
       if (e.key === ' ') {
         e.preventDefault()
         playback.togglePlayback()
-      } else if (e.key === 'a') {
-        setActiveTool('arrow')
-      } else if (e.key === 't') {
-        setActiveTool('text')
-      } else if (e.key === 'r') {
-        setActiveTool('rectangle')
       } else if (e.key === 'v') {
-        setActiveTool('select')
+        handleSetMode('select')
+      } else if (e.key === 'd' && drawEnabled) {
+        handleSetMode('draw')
       } else if (e.key === 'Escape') {
-        setActiveTool('select')
+        handleSetMode('select')
         setSelectedObjectId(null)
       } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedObject) {
         dispatch({ type: 'REMOVE_OBJECT', objectId: selectedObject.id })
@@ -53,7 +157,7 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [playback, activeTool, selectedObject, dispatch, undo, redo])
+  }, [playback, interactionMode, selectedObject, drawEnabled, dispatch, undo, redo, handleSetMode])
 
   const handleSelectObject = useCallback((id: string | null) => {
     setSelectedObjectId(id)
@@ -76,7 +180,12 @@ export default function App() {
           >
             Add Photo
           </button>
-          <AnnotationTools activeTool={activeTool} onSelectTool={setActiveTool} />
+          <AnnotationTools
+            interactionMode={interactionMode}
+            onSetMode={handleSetMode}
+            onCreateObject={handleCreateObject}
+            drawEnabled={drawEnabled}
+          />
           <span className="w-px h-6 bg-gray-700" />
           <button
             onClick={undo}
@@ -120,14 +229,16 @@ export default function App() {
           globalTime={playback.globalTime}
           width={project.width}
           height={project.height}
+          selectedObjectId={selectedObjectId}
+          interactionMode={interactionMode}
+          onSelectObject={handleSelectObject}
+          dispatch={dispatch}
         />
 
-        {selectedObject && (
-          <PropertiesPanel
-            object={selectedObject}
-            dispatch={dispatch}
-          />
-        )}
+        <PropertiesPanel
+          object={selectedObject}
+          dispatch={dispatch}
+        />
       </div>
 
       {/* Timeline */}

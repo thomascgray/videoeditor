@@ -1,34 +1,58 @@
-import type { AnnotationTool } from '../types'
+import type { InteractionMode, TimelineObjectType } from '../types'
 
 type AnnotationToolsProps = {
-  activeTool: AnnotationTool
-  onSelectTool: (tool: AnnotationTool) => void
+  interactionMode: InteractionMode
+  onSetMode: (mode: InteractionMode) => void
+  onCreateObject: (type: TimelineObjectType) => void
+  drawEnabled: boolean
 }
 
-const tools: { id: AnnotationTool; label: string; shortcut: string }[] = [
-  { id: 'select', label: 'Select', shortcut: 'V' },
-  { id: 'arrow', label: 'Arrow', shortcut: 'A' },
-  { id: 'text', label: 'Text', shortcut: 'T' },
-  { id: 'rectangle', label: 'Rect', shortcut: 'R' },
-  { id: 'circle', label: 'Circle', shortcut: 'C' },
-  { id: 'freehand', label: 'Pen', shortcut: 'P' },
+const creationButtons: { type: TimelineObjectType; label: string }[] = [
+  { type: 'arrow', label: '+ Arrow' },
+  { type: 'text', label: '+ Text' },
+  { type: 'rectangle', label: '+ Rect' },
+  { type: 'circle', label: '+ Circle' },
+  { type: 'freehand', label: '+ Pen' },
 ]
 
-export default function AnnotationTools({ activeTool, onSelectTool }: AnnotationToolsProps) {
+export default function AnnotationTools({ interactionMode, onSetMode, onCreateObject, drawEnabled }: AnnotationToolsProps) {
   return (
     <div className="flex items-center gap-1 px-2">
-      {tools.map((tool) => (
+      {/* Mode buttons */}
+      <button
+        onClick={() => onSetMode('select')}
+        className={`px-3 py-1.5 text-sm rounded transition-colors cursor-pointer ${
+          interactionMode === 'select'
+            ? 'bg-indigo-600 text-white'
+            : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
+        }`}
+        title="Select (V)"
+      >
+        Select
+      </button>
+      <button
+        onClick={() => onSetMode('draw')}
+        disabled={!drawEnabled}
+        className={`px-3 py-1.5 text-sm rounded transition-colors cursor-pointer ${
+          interactionMode === 'draw'
+            ? 'bg-indigo-600 text-white'
+            : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
+        } disabled:opacity-30 disabled:cursor-not-allowed`}
+        title="Draw (D)"
+      >
+        Draw
+      </button>
+
+      <span className="w-px h-6 bg-gray-700" />
+
+      {/* Creation buttons */}
+      {creationButtons.map((btn) => (
         <button
-          key={tool.id}
-          onClick={() => onSelectTool(tool.id)}
-          className={`px-3 py-1.5 text-sm rounded transition-colors cursor-pointer ${
-            activeTool === tool.id
-              ? 'bg-indigo-600 text-white'
-              : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
-          }`}
-          title={`${tool.label} (${tool.shortcut})`}
+          key={btn.type}
+          onClick={() => onCreateObject(btn.type)}
+          className="px-3 py-1.5 text-sm bg-gray-800 text-gray-300 hover:bg-gray-700 rounded transition-colors cursor-pointer"
         >
-          {tool.label}
+          {btn.label}
         </button>
       ))}
     </div>
