@@ -1,6 +1,8 @@
 import { useReducer, useCallback, useEffect, useRef } from 'react'
 import type { Project, ProjectAction } from '../types'
+import { createDefaultProject } from '../types'
 import { saveProject, loadProject } from '../lib/projectStorage'
+import { config } from '../config'
 
 type UndoableState = {
   past: Project[]
@@ -105,6 +107,25 @@ function applyAction(project: Project, action: ProjectAction): Project {
       return { ...project, objects }
     }
 
+    case 'REMOVE_LANE': {
+      const laneToRemove = action.lane
+      const lanes = [...new Set(project.objects.map((o) => o.lane))].sort((a, b) => a - b)
+      if (lanes.length <= 1) return project // don't remove the last lane
+
+      // Find target lane: prefer above (higher number), fall back to below
+      const aboveLanes = lanes.filter((l) => l > laneToRemove)
+      const belowLanes = lanes.filter((l) => l < laneToRemove).reverse()
+      const targetLane = aboveLanes.length > 0 ? aboveLanes[0] : belowLanes[0]
+      if (targetLane === undefined) return project
+
+      return {
+        ...project,
+        objects: project.objects.map((o) =>
+          o.lane === laneToRemove ? { ...o, lane: targetLane } : o,
+        ),
+      }
+    }
+
     default:
       return project
   }
@@ -113,14 +134,15 @@ function applyAction(project: Project, action: ProjectAction): Project {
 export function useProject() {
   const [state, dispatch] = useReducer(projectReducer, null, () => ({
     past: [],
-    present: loadProject(),
+    present: config.persistProject ? loadProject() : createDefaultProject(),
     future: [],
     transientSnapshot: null,
   }))
 
-  // Auto-save (debounced)
+  // Auto-save (debounced) — only when persistence is enabled
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout>>(undefined)
   useEffect(() => {
+    if (!config.persistProject) return
     clearTimeout(saveTimeoutRef.current)
     saveTimeoutRef.current = setTimeout(() => {
       saveProject(state.present)

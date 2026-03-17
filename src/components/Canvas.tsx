@@ -2,6 +2,9 @@ import { useRef, useEffect, useState, useCallback, useMemo } from 'react'
 import type { TimelineObject, InteractionMode, ProjectAction, ArrowData, FreehandData } from '../types'
 import { useCanvasRenderer } from '../hooks/useCanvasRenderer'
 import type { EditorOptions } from '../lib/renderer'
+import { segmentControlPoint, quadBezierAt } from '../lib/annotations'
+
+const ARROW_MAX_POINTS = 10
 
 // === Types ===
 
@@ -49,8 +52,8 @@ type CanvasProps = {
   height: number
   selectedObjectId: string | null
   interactionMode: InteractionMode
-  onSelectObject: (id: string | null) => void
   dispatch: React.Dispatch<ProjectAction>
+  onFinishArrow?: () => void
 }
 
 // === Constants ===
@@ -318,14 +321,16 @@ export default function Canvas({
   height,
   selectedObjectId,
   interactionMode,
-  onSelectObject,
   dispatch,
+  onFinishArrow,
 }: CanvasProps) {
   const renderCanvasRef = useRef<HTMLCanvasElement>(null)
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null)
   const [dragState, setDragState] = useState<DragState>(null)
   const [cursor, setCursor] = useState('default')
   const dragStateRef = useRef<DragState>(null)
+  const mouseNormRef = useRef<{ nx: number; ny: number } | null>(null)
+  const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number } | null>(null)
 
   const activeDrawingObjectId = dragState?.kind === 'draw-freehand' ? dragState.objectId : null
   const editorOpts = useMemo<EditorOptions>(() => ({
@@ -365,7 +370,74 @@ export default function Canvas({
     ctx.lineWidth = 2
     ctx.strokeRect(1, 1, width - 2, height - 2)
 
-    if (!selectedObject || interactionMode !== 'select') return
+    if (!selectedObject) return
+
+    // --- Arrow draw mode overlay: vertex dots + rubber band ---
+    if (interactionMode === 'draw' && selectedObject.type === 'arrow') {
+      const obj = selectedObject
+      const data = obj.data as ArrowData
+      const bx = obj.x * width
+      const by = obj.y * height
+      const bw = obj.width * width
+      const bh = obj.height * height
+
+      ctx.save()
+      if (obj.rotation !== 0) {
+        const ccx = bx + bw / 2
+        const ccy = by + bh / 2
+        ctx.translate(ccx, ccy)
+        ctx.rotate(obj.rotation)
+        ctx.translate(-ccx, -ccy)
+      }
+
+      const pixelPoints = data.points.map((p) => ({
+        x: bx + p.x * bw,
+        y: by + p.y * bh,
+      }))
+
+      // Draw vertex dots
+      for (const pt of pixelPoints) {
+        ctx.beginPath()
+        ctx.arc(pt.x, pt.y, 5, 0, Math.PI * 2)
+        ctx.fillStyle = obj.style.color
+        ctx.fill()
+        ctx.strokeStyle = '#ffffff'
+        ctx.lineWidth = 1.5
+        ctx.stroke()
+      }
+
+      // Rubber band preview line from last point to cursor
+      const mouse = mouseNormRef.current
+      if (pixelPoints.length > 0 && mouse) {
+        const last = pixelPoints[pixelPoints.length - 1]
+        const cursorX = mouse.nx * width
+        const cursorY = mouse.ny * height
+
+        ctx.setLineDash([6, 4])
+        ctx.strokeStyle = obj.style.color
+        ctx.lineWidth = 2
+        ctx.globalAlpha = 0.7
+
+        const curvature = data.curvature ?? 0
+        ctx.beginPath()
+        ctx.moveTo(last.x, last.y)
+        if (curvature !== 0) {
+          const cp = segmentControlPoint(last.x, last.y, cursorX, cursorY, curvature)
+          ctx.quadraticCurveTo(cp.x, cp.y, cursorX, cursorY)
+        } else {
+          ctx.lineTo(cursorX, cursorY)
+        }
+        ctx.stroke()
+
+        ctx.setLineDash([])
+        ctx.globalAlpha = 1
+      }
+
+      ctx.restore()
+      return
+    }
+
+    if (interactionMode !== 'move') return
 
     const obj = selectedObject
     const bx = obj.x * width
@@ -443,30 +515,45 @@ export default function Canvas({
 
   // --- Mouse handlers ---
 
+  // Helper to add a point to the current arrow
+  const addArrowPoint = useCallback((nx: number, ny: number) => {
+    if (!selectedObject || selectedObject.type !== 'arrow') return false
+    const data = selectedObject.data as ArrowData
+    if (data.points.length >= ARROW_MAX_POINTS) return false
+    const { bx, by } = normToObjectBbox(nx, ny, selectedObject)
+    const newPoints = [...data.points, { x: bx, y: by }]
+    dispatch({
+      type: 'UPDATE_OBJECT',
+      objectId: selectedObject.id,
+      updates: { data: { ...data, points: newPoints } },
+    })
+    // Auto-finish at max points
+    if (newPoints.length >= ARROW_MAX_POINTS) {
+      onFinishArrow?.()
+    }
+    return true
+  }, [selectedObject, dispatch, onFinishArrow])
+
   const handleMouseDown = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
       const canvas = overlayCanvasRef.current
       if (!canvas) return
+      if (!selectedObject) return
 
       const { nx, ny } = clientToNorm(e, canvas)
 
       // --- Draw mode ---
-      if (interactionMode === 'draw' && selectedObject) {
+      if (interactionMode === 'draw') {
         const isDrawable = selectedObject.type === 'arrow' || selectedObject.type === 'freehand'
         if (!isDrawable) return
 
-        const { bx, by } = normToObjectBbox(nx, ny, selectedObject)
-
         if (selectedObject.type === 'arrow') {
-          // Click adds a point to the arrow
-          const data = selectedObject.data as ArrowData
-          const newPoints = [...data.points, { x: bx, y: by }]
-          dispatch({
-            type: 'UPDATE_OBJECT',
-            objectId: selectedObject.id,
-            updates: { data: { ...data, points: newPoints } },
-          })
+          // Left click only — right-click handled by onContextMenu
+          if (e.button === 0) {
+            addArrowPoint(nx, ny)
+          }
         } else {
+          const { bx, by } = normToObjectBbox(nx, ny, selectedObject)
           // Freehand: mousedown starts a new stroke
           const data = selectedObject.data as FreehandData
           const newStrokes = [...data.strokes, [{ x: bx, y: by }]]
@@ -480,72 +567,57 @@ export default function Canvas({
         return
       }
 
-      if (interactionMode !== 'select') return
+      if (interactionMode !== 'move') return
 
-      // If we have a selected object, check handles first
-      if (selectedObject) {
-        const handle = hitTestHandles(nx, ny, selectedObject, width, height)
+      // Check handles on the selected object (rotate, resize)
+      const handle = hitTestHandles(nx, ny, selectedObject, width, height)
 
-        if (handle === 'rotate') {
-          const centerNx = selectedObject.x + selectedObject.width / 2
-          const centerNy = selectedObject.y + selectedObject.height / 2
-          const startAngle = Math.atan2(ny - centerNy, nx - centerNx)
-          setDragState({
-            kind: 'rotate',
-            objectId: selectedObject.id,
-            centerNx,
-            centerNy,
-            startAngle,
-            origRotation: selectedObject.rotation,
-          })
-          return
-        }
-
-        if (handle) {
-          setDragState({
-            kind: 'resize',
-            objectId: selectedObject.id,
-            handle,
-            startNx: nx,
-            startNy: ny,
-            origX: selectedObject.x,
-            origY: selectedObject.y,
-            origW: selectedObject.width,
-            origH: selectedObject.height,
-            rotation: selectedObject.rotation,
-          })
-          return
-        }
+      if (handle === 'rotate') {
+        const centerNx = selectedObject.x + selectedObject.width / 2
+        const centerNy = selectedObject.y + selectedObject.height / 2
+        const startAngle = Math.atan2(ny - centerNy, nx - centerNx)
+        setDragState({
+          kind: 'rotate',
+          objectId: selectedObject.id,
+          centerNx,
+          centerNy,
+          startAngle,
+          origRotation: selectedObject.rotation,
+        })
+        return
       }
 
-      // Hit test objects (top lane first for z-order priority)
-      const visibleObjects = objects
-        .filter(
-          (obj) =>
-            globalTime >= obj.startTime &&
-            globalTime < obj.startTime + obj.duration,
-        )
-        .sort((a, b) => b.lane - a.lane)
-
-      for (const obj of visibleObjects) {
-        if (hitTestObject(nx, ny, obj)) {
-          onSelectObject(obj.id)
-          setDragState({
-            kind: 'move',
-            objectId: obj.id,
-            startNx: nx,
-            startNy: ny,
-            origX: obj.x,
-            origY: obj.y,
-          })
-          return
-        }
+      if (handle) {
+        setDragState({
+          kind: 'resize',
+          objectId: selectedObject.id,
+          handle,
+          startNx: nx,
+          startNy: ny,
+          origX: selectedObject.x,
+          origY: selectedObject.y,
+          origW: selectedObject.width,
+          origH: selectedObject.height,
+          rotation: selectedObject.rotation,
+        })
+        return
       }
 
-      // Clicked empty space
-      onSelectObject(null)
+      // Hit test on the selected object body for move
+      if (hitTestObject(nx, ny, selectedObject)) {
+        setDragState({
+          kind: 'move',
+          objectId: selectedObject.id,
+          startNx: nx,
+          startNy: ny,
+          origX: selectedObject.x,
+          origY: selectedObject.y,
+        })
+      }
+
+      // Clicking empty space does nothing — deselect via Escape or timeline
     },
-    [interactionMode, selectedObject, objects, globalTime, width, height, onSelectObject],
+    [interactionMode, selectedObject, width, height, dispatch],
   )
 
   const handleMouseMove = useCallback(
@@ -554,6 +626,12 @@ export default function Canvas({
       if (!canvas) return
 
       const { nx, ny } = clientToNorm(e, canvas)
+      mouseNormRef.current = { nx, ny }
+
+      // Update tooltip position (relative to the canvas container)
+      const rect = canvas.getBoundingClientRect()
+      setTooltipPos({ x: e.clientX - rect.left + 15, y: e.clientY - rect.top + 15 })
+
       const ds = dragStateRef.current
 
       if (ds) {
@@ -600,16 +678,24 @@ export default function Canvas({
             updates: { rotation: newRotation },
           })
         }
+        // Redraw overlay for rubber band during drag in arrow draw mode
+        if (interactionMode === 'draw' && selectedObject?.type === 'arrow') {
+          drawOverlay()
+        }
         return
       }
 
       // --- Hover cursor feedback ---
-      if (interactionMode !== 'select') {
+      if (interactionMode === 'draw') {
         setCursor('crosshair')
+        // Redraw overlay for rubber band preview
+        if (selectedObject?.type === 'arrow') {
+          drawOverlay()
+        }
         return
       }
 
-      if (selectedObject) {
+      if (interactionMode === 'move' && selectedObject) {
         const handle = hitTestHandles(nx, ny, selectedObject, width, height)
         if (handle) {
           setCursor(getHandleCursor(handle, selectedObject.rotation))
@@ -621,25 +707,9 @@ export default function Canvas({
         }
       }
 
-      // Check if hovering any other object
-      const visibleObjects = objects
-        .filter(
-          (obj) =>
-            globalTime >= obj.startTime &&
-            globalTime < obj.startTime + obj.duration,
-        )
-        .sort((a, b) => b.lane - a.lane)
-
-      for (const obj of visibleObjects) {
-        if (hitTestObject(nx, ny, obj)) {
-          setCursor('pointer')
-          return
-        }
-      }
-
       setCursor('default')
     },
-    [interactionMode, selectedObject, objects, globalTime, width, height, dispatch],
+    [interactionMode, selectedObject, width, height, dispatch, drawOverlay],
   )
 
   const handleMouseUp = useCallback(() => {
@@ -724,6 +794,59 @@ export default function Canvas({
     }
   }, [dragState, dispatch, objects])
 
+  // --- Right-click: finish arrow drawing ---
+  const handleContextMenu = useCallback(
+    (e: React.MouseEvent<HTMLCanvasElement>) => {
+      if (interactionMode === 'draw' && selectedObject?.type === 'arrow') {
+        e.preventDefault()
+        const data = selectedObject.data as ArrowData
+        if (data.points.length >= 2) {
+          onFinishArrow?.()
+        }
+      }
+    },
+    [interactionMode, selectedObject, onFinishArrow],
+  )
+
+  // --- Double-click: place final point and finish ---
+  const dblClickTimerRef = useRef<number | null>(null)
+  const handleDoubleClick = useCallback(
+    (e: React.MouseEvent<HTMLCanvasElement>) => {
+      if (interactionMode === 'draw' && selectedObject?.type === 'arrow') {
+        // The two mousedown events already added two points — remove the extra one
+        const data = selectedObject.data as ArrowData
+        if (data.points.length >= 2) {
+          const trimmed = data.points.slice(0, -1)
+          dispatch({
+            type: 'UPDATE_OBJECT',
+            objectId: selectedObject.id,
+            updates: { data: { ...data, points: trimmed } },
+          })
+        }
+        onFinishArrow?.()
+      }
+    },
+    [interactionMode, selectedObject, dispatch, onFinishArrow],
+  )
+
+  // --- Mouse leave: hide tooltip ---
+  const handleMouseLeave = useCallback(() => {
+    setTooltipPos(null)
+    mouseNormRef.current = null
+  }, [])
+
+  // --- Tooltip text ---
+  const tooltipText = useMemo(() => {
+    if (interactionMode !== 'draw' || selectedObject?.type !== 'arrow') return null
+    const data = selectedObject.data as ArrowData
+    const count = data.points.length
+    const segments = Math.max(0, count - 1)
+    if (count >= ARROW_MAX_POINTS - 1) return 'Click to place last point (max reached)'
+    if (count === 0) return 'Click to place first point'
+    if (count === 1) return 'Click to add points'
+    return `Click to add points \u00b7 Right-click to finish with ${segments} segment${segments !== 1 ? 's' : ''}`
+  }, [interactionMode, selectedObject])
+
   return (
     <div className="flex-1 flex items-center justify-center bg-gray-950 p-4 overflow-hidden">
       <div className="relative max-w-full max-h-full" style={{ aspectRatio: `${width}/${height}` }}>
@@ -739,7 +862,18 @@ export default function Canvas({
           onMouseDown={handleMouseDown}
           onMouseMove={handleMouseMove}
           onMouseUp={handleMouseUp}
+          onContextMenu={handleContextMenu}
+          onDoubleClick={handleDoubleClick}
+          onMouseLeave={handleMouseLeave}
         />
+        {tooltipText && tooltipPos && (
+          <div
+            className="absolute bg-black/80 text-white text-xs px-2 py-1 rounded pointer-events-none whitespace-nowrap"
+            style={{ left: tooltipPos.x, top: tooltipPos.y }}
+          >
+            {tooltipText}
+          </div>
+        )}
       </div>
     </div>
   )

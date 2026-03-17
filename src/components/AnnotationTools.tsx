@@ -21,15 +21,15 @@ export default function AnnotationTools({ interactionMode, onSetMode, onCreateOb
     <div className="flex items-center gap-1 px-2">
       {/* Mode buttons */}
       <button
-        onClick={() => onSetMode('select')}
+        onClick={() => onSetMode('move')}
         className={`px-3 py-1.5 text-sm rounded transition-colors cursor-pointer ${
-          interactionMode === 'select'
+          interactionMode === 'move'
             ? 'bg-indigo-600 text-white'
             : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
         }`}
-        title="Select (V)"
+        title="Move (M)"
       >
-        Select
+        Move
       </button>
       <button
         onClick={() => onSetMode('draw')}

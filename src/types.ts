@@ -43,7 +43,7 @@ export type PhotoData = {
 export type ArrowData = {
   points: { x: number; y: number }[]  // 0–1 relative to object's bounding box
   headSize: number
-  curved: boolean
+  curvature: number  // -1 to 1. 0 = straight, positive = curve right, negative = curve left
 }
 
 export type TextData = {
@@ -71,7 +71,7 @@ export type Project = {
 
 // === Interaction Modes ===
 
-export type InteractionMode = 'select' | 'draw'
+export type InteractionMode = 'move' | 'draw'
 
 // === Actions ===
 
@@ -84,6 +84,7 @@ export type ProjectAction =
   | { type: 'UPDATE_OBJECT_TRANSIENT'; objectId: string; updates: Partial<Omit<TimelineObject, 'id' | 'type'>> }
   | { type: 'COMMIT_TRANSIENT' }
   | { type: 'DUPLICATE_OBJECT'; objectId: string }
+  | { type: 'REMOVE_LANE'; lane: number }
   | { type: 'UNDO' }
   | { type: 'REDO' }
 

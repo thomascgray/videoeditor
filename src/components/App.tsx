@@ -14,7 +14,7 @@ export default function App() {
   const { project, dispatch, canUndo, canRedo, undo, redo } = useProject()
   const playback = usePlayback(project)
 
-  const [interactionMode, setInteractionMode] = useState<InteractionMode>('select')
+  const [interactionMode, setInteractionMode] = useState<InteractionMode>('move')
   const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null)
   const [showImport, setShowImport] = useState(false)
   const [showExport, setShowExport] = useState(false)
@@ -100,16 +100,16 @@ export default function App() {
 
   const handleSetMode = useCallback((mode: InteractionMode) => {
     // Tighten bbox when leaving draw mode
-    if (interactionMode === 'draw' && mode === 'select' && selectedObjectId) {
+    if (interactionMode === 'draw' && mode === 'move' && selectedObjectId) {
       tightenBbox(selectedObjectId)
     }
     setInteractionMode(mode)
   }, [interactionMode, selectedObjectId, tightenBbox])
 
-  // If draw mode is active but no longer valid, switch back to select
+  // If draw mode is active but no longer valid, switch back to move
   useEffect(() => {
     if (interactionMode === 'draw' && !drawEnabled) {
-      setInteractionMode('select')
+      setInteractionMode('move')
     }
   }, [interactionMode, drawEnabled])
 
@@ -123,7 +123,7 @@ export default function App() {
 
   const handleCreateObject = useCallback((type: TimelineObjectType) => {
     const defaultData: Record<TimelineObjectType, () => ReturnType<typeof createTimelineObject>['data']> = {
-      arrow: () => ({ points: [], headSize: 20, curved: false }),
+      arrow: () => ({ points: [], headSize: 20, curvature: 0 }),
       text: () => ({ content: 'Text' }),
       rectangle: () => ({} as Record<string, never>),
       circle: () => ({} as Record<string, never>),
@@ -143,13 +143,21 @@ export default function App() {
     const [added] = addObjects([obj])
     setSelectedObjectId(added.id)
 
-    // Auto-enter draw mode for arrow/freehand
+    // Auto-enter draw mode for arrow/freehand, move mode for others
     if (type === 'arrow' || type === 'freehand') {
       handleSetMode('draw')
     } else {
-      handleSetMode('select')
+      handleSetMode('move')
     }
   }, [playback.globalTime, addObjects, handleSetMode])
+
+  // Finish arrow drawing: tighten bbox + switch to move mode
+  const handleFinishArrow = useCallback(() => {
+    if (selectedObjectId) {
+      tightenBbox(selectedObjectId)
+    }
+    handleSetMode('move')
+  }, [selectedObjectId, tightenBbox, handleSetMode])
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -159,13 +167,30 @@ export default function App() {
       if (e.key === ' ') {
         e.preventDefault()
         playback.togglePlayback()
-      } else if (e.key === 'v') {
-        handleSetMode('select')
+      } else if (e.key === 'm') {
+        handleSetMode('move')
       } else if (e.key === 'd' && drawEnabled) {
         handleSetMode('draw')
+      } else if (e.key === 'Enter' && interactionMode === 'draw' && selectedObject?.type === 'arrow') {
+        // Finish arrow drawing with Enter
+        const data = selectedObject.data as ArrowData
+        if (data.points.length >= 2) {
+          handleFinishArrow()
+        }
       } else if (e.key === 'Escape') {
-        handleSetMode('select')
+        handleSetMode('move')
         setSelectedObjectId(null)
+      } else if (e.key === 'Backspace' && interactionMode === 'draw' && selectedObject?.type === 'arrow') {
+        // Remove last arrow point
+        e.preventDefault()
+        const data = selectedObject.data as ArrowData
+        if (data.points.length > 0) {
+          dispatch({
+            type: 'UPDATE_OBJECT',
+            objectId: selectedObject.id,
+            updates: { data: { ...data, points: data.points.slice(0, -1) } },
+          })
+        }
       } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedObject) {
         dispatch({ type: 'REMOVE_OBJECT', objectId: selectedObject.id })
         setSelectedObjectId(null)
@@ -180,11 +205,20 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [playback, interactionMode, selectedObject, drawEnabled, dispatch, undo, redo, handleSetMode])
+  }, [playback, interactionMode, selectedObject, drawEnabled, dispatch, undo, redo, handleSetMode, handleFinishArrow])
 
   const handleSelectObject = useCallback((id: string | null) => {
     setSelectedObjectId(id)
-  }, [])
+    // Auto-switch mode based on selected object type
+    if (id) {
+      const obj = project.objects.find((o) => o.id === id)
+      if (obj && (obj.type === 'arrow' || obj.type === 'freehand')) {
+        setInteractionMode('draw')
+      } else {
+        setInteractionMode('move')
+      }
+    }
+  }, [project.objects])
 
   return (
     <div className="h-screen flex flex-col bg-gray-950 text-white">
@@ -249,8 +283,8 @@ export default function App() {
           height={project.height}
           selectedObjectId={selectedObjectId}
           interactionMode={interactionMode}
-          onSelectObject={handleSelectObject}
           dispatch={dispatch}
+          onFinishArrow={handleFinishArrow}
         />
 
         <PropertiesPanel

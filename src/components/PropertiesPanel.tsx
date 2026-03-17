@@ -1,4 +1,4 @@
-import type { TimelineObject, ProjectAction } from '../types'
+import type { TimelineObject, ProjectAction, ArrowData } from '../types'
 
 type PropertiesPanelProps = {
   object: TimelineObject | null
@@ -104,6 +104,33 @@ export default function PropertiesPanel({ object: obj, dispatch }: PropertiesPan
               <NumberInput value={obj.style.fontSize ?? 32} min={8} max={200} step={1} onChange={(v) => updateStyle({ fontSize: v })} />
             </Field>
           )}
+        </Section>
+      )}
+
+      {/* Arrow-specific */}
+      {obj.type === 'arrow' && (
+        <Section title="Arrow">
+          <Field label="Curvature">
+            <div className="flex items-center gap-2 w-full">
+              <input
+                type="range"
+                min={-100} max={100} step={1}
+                value={Math.round(((obj.data as ArrowData).curvature ?? 0) * 100)}
+                onChange={(e) => {
+                  const arrowData = obj.data as ArrowData
+                  update({ data: { ...arrowData, curvature: Number(e.target.value) / 100 } })
+                }}
+                onDoubleClick={() => {
+                  const arrowData = obj.data as ArrowData
+                  update({ data: { ...arrowData, curvature: 0 } })
+                }}
+                className="w-full"
+              />
+              <span className="text-[10px] text-gray-500 tabular-nums w-8 text-right">
+                {((obj.data as ArrowData).curvature ?? 0).toFixed(1)}
+              </span>
+            </div>
+          </Field>
         </Section>
       )}
 
