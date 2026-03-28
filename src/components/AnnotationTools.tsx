@@ -4,7 +4,7 @@ type AnnotationToolsProps = {
   interactionMode: InteractionMode
   onSetMode: (mode: InteractionMode) => void
   onCreateObject: (type: TimelineObjectType) => void
-  onAddImage: () => void
+  onAddAsset: () => void
   drawEnabled: boolean
 }
 
@@ -16,7 +16,7 @@ const creationButtons: { type: TimelineObjectType; label: string }[] = [
   { type: 'freehand', label: '+ Pen' },
 ]
 
-export default function AnnotationTools({ interactionMode, onSetMode, onCreateObject, onAddImage, drawEnabled }: AnnotationToolsProps) {
+export default function AnnotationTools({ interactionMode, onSetMode, onCreateObject, onAddAsset, drawEnabled }: AnnotationToolsProps) {
   return (
     <div className="flex items-center gap-1 px-2">
       {/* Mode buttons */}
@@ -48,10 +48,10 @@ export default function AnnotationTools({ interactionMode, onSetMode, onCreateOb
 
       {/* Creation buttons */}
       <button
-        onClick={onAddImage}
+        onClick={onAddAsset}
         className="px-3 py-1.5 text-sm bg-gray-800 text-gray-300 hover:bg-gray-700 rounded transition-colors cursor-pointer"
       >
-        + Image
+        + Asset
       </button>
       {creationButtons.map((btn) => (
         <button

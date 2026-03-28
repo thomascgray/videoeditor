@@ -147,8 +147,9 @@ export function drawArrow(
 
   ctx.stroke()
 
-  // Draw arrowhead when progress > 0.95
-  if (progress > 0.95) {
+  // Draw arrowhead
+  const showHead = data.progressiveHead ? progress > 0 : progress > 0.95
+  if (showHead) {
     const headSize = data.headSize * (style.lineWidth * scaleFactor / 4)
     ctx.beginPath()
     ctx.moveTo(endPoint.x, endPoint.y)

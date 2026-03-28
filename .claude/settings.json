@@ -2,7 +2,14 @@
   "permissions": {
     "allow": [
       "Bash(git checkout:*)",
-      "Bash(git merge:*)"
+      "Bash(git merge:*)",
+      "WebSearch",
+      "WebFetch(domain:dev.to)",
+      "WebFetch(domain:devtails.xyz)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:www.remotion.dev)",
+      "WebFetch(domain:developer.chrome.com)",
+      "WebFetch(domain:caniuse.com)"
     ],
     "additionalDirectories": [
       "c:\\Programming\\battlereporteditor\\SPECS"

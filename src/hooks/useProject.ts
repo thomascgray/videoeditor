@@ -81,6 +81,9 @@ function applyAction(project: Project, action: ProjectAction): Project {
     case 'ADD_OBJECTS':
       return { ...project, objects: [...project.objects, ...action.objects] }
 
+    case 'ADD_ASSETS':
+      return { ...project, assets: [...project.assets, ...action.assets] }
+
     case 'REMOVE_OBJECT':
       return { ...project, objects: project.objects.filter((o) => o.id !== action.objectId) }
 

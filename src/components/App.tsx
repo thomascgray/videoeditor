@@ -1,8 +1,11 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
-import type { InteractionMode, TimelineObjectType, TimelineObject, ArrowData, FreehandData } from '../types'
+import type { InteractionMode, TimelineObjectType, TimelineObject, ArrowData, FreehandData, AssetMeta } from '../types'
 import { createTimelineObject } from '../types'
 import { useProject } from '../hooks/useProject'
 import { usePlayback } from '../hooks/usePlayback'
+import { useAudioPlayback } from '../hooks/useAudioPlayback'
+import { loadAssetsFromDB } from '../lib/assetStore'
+import { exportProjectBrep, importProjectBrep } from '../lib/projectStorage'
 import Canvas from './Canvas'
 import AnnotationTools from './AnnotationTools'
 import Timeline from './Timeline'
@@ -14,10 +17,17 @@ export default function App() {
   const { project, dispatch, canUndo, canRedo, undo, redo } = useProject()
   const playback = usePlayback(project)
 
+  // Load asset blobs from IndexedDB on startup
+  useEffect(() => { loadAssetsFromDB() }, [])
+
+  // Audio/video playback sync
+  const { isMuted, toggleMute } = useAudioPlayback(project.objects, playback.globalTime, playback.isPlaying)
+
   const [interactionMode, setInteractionMode] = useState<InteractionMode>('move')
   const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null)
   const [showImport, setShowImport] = useState(false)
   const [showExport, setShowExport] = useState(false)
+  const projectFileRef = useRef<HTMLInputElement>(null)
 
   const selectedObject = project.objects.find((o) => o.id === selectedObjectId) ?? null
 
@@ -113,6 +123,20 @@ export default function App() {
     }
   }, [interactionMode, drawEnabled])
 
+  const handleExportProject = useCallback(async () => {
+    await exportProjectBrep(project)
+  }, [project])
+
+  const handleImportProject = useCallback(async (file: File) => {
+    try {
+      const imported = await importProjectBrep(file)
+      dispatch({ type: 'SET_PROJECT', project: imported })
+    } catch (e) {
+      console.error('Failed to import project:', e)
+      alert('Failed to import project file.')
+    }
+  }, [dispatch])
+
   // Central helper: assigns each object to a new lane above all existing objects, then dispatches
   const addObjects = useCallback((objects: TimelineObject[]) => {
     const maxLane = project.objects.reduce((max, o) => Math.max(max, o.lane), -1)
@@ -123,12 +147,14 @@ export default function App() {
 
   const handleCreateObject = useCallback((type: TimelineObjectType) => {
     const defaultData: Record<TimelineObjectType, () => ReturnType<typeof createTimelineObject>['data']> = {
-      arrow: () => ({ points: [], headSize: 20, curvature: 0 }),
+      arrow: () => ({ points: [], headSize: 20, curvature: 0, progressiveHead: true }),
       text: () => ({ content: 'Text' }),
       rectangle: () => ({} as Record<string, never>),
       circle: () => ({} as Record<string, never>),
       freehand: () => ({ strokes: [] }),
-      photo: () => ({ src: '' }),
+      photo: () => ({ assetId: '' }),
+      audio: () => ({ assetId: '', volume: 1, originalDuration: 0 }),
+      video: () => ({ assetId: '', volume: 1, originalDuration: 0 }),
     }
 
     const obj = createTimelineObject(type, defaultData[type](), {
@@ -224,18 +250,45 @@ export default function App() {
     <div className="h-screen flex flex-col bg-gray-950 text-white">
       {/* Top Bar */}
       <header className="h-12 flex items-center justify-between px-4 bg-gray-900 border-b border-gray-700 shrink-0">
-        <input
-          type="text"
-          value={project.name}
-          onChange={(e) => dispatch({ type: 'SET_NAME', name: e.target.value })}
-          className="bg-transparent text-white font-semibold text-sm border-b border-transparent hover:border-gray-600 focus:border-indigo-500 outline-none px-1 py-0.5"
-        />
+        <div className="flex items-center gap-2">
+          <input
+            type="text"
+            value={project.name}
+            onChange={(e) => dispatch({ type: 'SET_NAME', name: e.target.value })}
+            className="bg-transparent text-white font-semibold text-sm border-b border-transparent hover:border-gray-600 focus:border-indigo-500 outline-none px-1 py-0.5"
+          />
+          <button
+            onClick={handleExportProject}
+            className="px-2 py-1 text-xs text-gray-400 hover:text-white bg-gray-800 hover:bg-gray-700 rounded transition-colors cursor-pointer"
+            title="Save project as .brep"
+          >
+            Save
+          </button>
+          <button
+            onClick={() => projectFileRef.current?.click()}
+            className="px-2 py-1 text-xs text-gray-400 hover:text-white bg-gray-800 hover:bg-gray-700 rounded transition-colors cursor-pointer"
+            title="Load project from .brep"
+          >
+            Load
+          </button>
+          <input
+            ref={projectFileRef}
+            type="file"
+            accept=".brep"
+            className="hidden"
+            onChange={(e) => {
+              const file = e.target.files?.[0]
+              if (file) handleImportProject(file)
+              e.target.value = ''
+            }}
+          />
+        </div>
         <div className="flex items-center gap-2">
           <AnnotationTools
             interactionMode={interactionMode}
             onSetMode={handleSetMode}
             onCreateObject={handleCreateObject}
-            onAddImage={() => setShowImport(true)}
+            onAddAsset={() => setShowImport(true)}
             drawEnabled={drawEnabled}
           />
           <span className="w-px h-6 bg-gray-700" />
@@ -261,6 +314,15 @@ export default function App() {
             className="px-3 py-1.5 text-sm bg-gray-800 hover:bg-gray-700 rounded transition-colors cursor-pointer"
           >
             {playback.isPlaying ? 'Pause' : 'Play'}
+          </button>
+          <button
+            onClick={toggleMute}
+            className={`px-2 py-1.5 text-sm rounded transition-colors cursor-pointer ${
+              isMuted ? 'bg-red-900/50 text-red-300 hover:bg-red-800/50' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
+            }`}
+            title={isMuted ? 'Unmute' : 'Mute'}
+          >
+            {isMuted ? 'Muted' : 'Sound'}
           </button>
           <span className="text-xs text-gray-400 tabular-nums min-w-16 text-right">
             {playback.globalTime.toFixed(1)}s / {playback.totalDuration.toFixed(1)}s
@@ -310,6 +372,7 @@ export default function App() {
           onImport={addObjects}
           onClose={() => setShowImport(false)}
           insertAtTime={playback.globalTime}
+          onAssetsAdded={(assets) => dispatch({ type: 'ADD_ASSETS', assets })}
         />
       )}
       {showExport && <ExportModal project={project} onClose={() => setShowExport(false)} />}

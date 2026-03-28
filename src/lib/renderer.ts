@@ -1,4 +1,4 @@
-import type { TimelineObject, ArrowData, TextData, FreehandData, PhotoData, ObjectStyle } from '../types'
+import type { TimelineObject, ArrowData, TextData, FreehandData, PhotoData, VideoData, ObjectStyle } from '../types'
 import {
   drawArrow,
   drawText,
@@ -23,7 +23,7 @@ export function renderFrame(
   objects: TimelineObject[],
   globalTime: number,
   options: { width: number; height: number },
-  imageCache: Map<string, HTMLImageElement | ImageBitmap>,
+  imageCache: Map<string, HTMLImageElement | HTMLVideoElement | ImageBitmap>,
   editorOptions?: EditorOptions,
 ) {
   const { width: w, height: h } = options
@@ -71,7 +71,7 @@ function drawObject(
   progress: number,
   w: number,
   h: number,
-  imageCache: Map<string, HTMLImageElement | ImageBitmap>,
+  imageCache: Map<string, HTMLImageElement | HTMLVideoElement | ImageBitmap>,
   styleOverride?: ObjectStyle,
 ) {
   const style = styleOverride ?? obj.style
@@ -83,8 +83,10 @@ function drawObject(
   const cx = bx + bw / 2
   const cy = by + bh / 2
 
-  // Scale factor for lineWidth/fontSize: sqrt(area ratio) relative to full canvas
-  const scaleFactor = Math.sqrt((bw * bh) / (w * h))
+  // Scale factor for lineWidth/fontSize: based on canvas resolution (not object bbox)
+  // so that all objects at the same lineWidth render at the same visual thickness
+  const REF_AREA = 1920 * 1080
+  const scaleFactor = Math.sqrt((w * h) / REF_AREA)
 
   ctx.save()
 
@@ -98,7 +100,7 @@ function drawObject(
   switch (obj.type) {
     case 'photo': {
       const data = obj.data as PhotoData
-      const img = imageCache.get(data.src)
+      const img = imageCache.get(data.assetId)
       if (img) {
         ctx.globalAlpha = style.opacity * progress
         drawImageCover(ctx, img, bx, by, bw, bh)
@@ -120,6 +122,18 @@ function drawObject(
     case 'freehand':
       drawFreehand(ctx, obj.data as FreehandData, style, progress, bx, by, bw, bh, scaleFactor)
       break
+    case 'video': {
+      const vdata = obj.data as VideoData
+      const videoEl = imageCache.get(vdata.assetId)
+      if (videoEl) {
+        ctx.globalAlpha = style.opacity * progress
+        drawImageCover(ctx, videoEl, bx, by, bw, bh)
+      }
+      break
+    }
+    case 'audio':
+      // Audio has no visual representation on canvas
+      break
   }
 
   ctx.restore()
@@ -130,23 +144,26 @@ function drawObject(
  */
 function drawImageCover(
   ctx: CanvasRenderingContext2D,
-  img: HTMLImageElement | ImageBitmap,
+  img: HTMLImageElement | HTMLVideoElement | ImageBitmap,
   dx: number,
   dy: number,
   dw: number,
   dh: number,
 ) {
-  const imgRatio = img.width / img.height
+  const imgW = img instanceof HTMLVideoElement ? img.videoWidth : img.width
+  const imgH = img instanceof HTMLVideoElement ? img.videoHeight : img.height
+  if (imgW === 0 || imgH === 0) return
+  const imgRatio = imgW / imgH
   const targetRatio = dw / dh
 
-  let sx = 0, sy = 0, sw = img.width, sh = img.height
+  let sx = 0, sy = 0, sw = imgW, sh = imgH
 
   if (imgRatio > targetRatio) {
-    sw = img.height * targetRatio
-    sx = (img.width - sw) / 2
+    sw = imgH * targetRatio
+    sx = (imgW - sw) / 2
   } else {
-    sh = img.width / targetRatio
-    sy = (img.height - sh) / 2
+    sh = imgW / targetRatio
+    sy = (imgH - sh) / 2
   }
 
   ctx.drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh)

@@ -1,5 +1,5 @@
 import { useRef, useCallback, useState, useEffect } from 'react'
-import type { TimelineObject, ProjectAction } from '../types'
+import type { TimelineObject, ProjectAction, AudioData, VideoData } from '../types'
 
 type TimelineProps = {
   objects: TimelineObject[]
@@ -32,6 +32,8 @@ const TYPE_COLORS: Record<string, string> = {
   text: '#22c55e',      // green
   rectangle: '#f59e0b', // amber
   circle: '#a855f7',    // purple
+  audio: '#14b8a6',     // teal
+  video: '#8b5cf6',     // violet
   freehand: '#ec4899',  // pink
 }
 
@@ -161,8 +163,13 @@ export default function Timeline({
           dragState.originalStartTime + dt,
         ))
         const newStart = Math.round(rawStart * 10) / 10
-        const newDuration = Math.round((dragState.originalStartTime + dragState.originalDuration - newStart) * 10) / 10
+        let newDuration = Math.round((dragState.originalStartTime + dragState.originalDuration - newStart) * 10) / 10
         const obj = objects.find((o) => o.id === dragState.objectId)
+        // Clamp duration for audio/video to respect 0.25x–4x playback rate
+        if (obj && (obj.type === 'audio' || obj.type === 'video')) {
+          const origDur = (obj.data as AudioData | VideoData).originalDuration
+          newDuration = Math.max(origDur / 4, Math.min(origDur * 4, newDuration))
+        }
         const clampedAnimateIn = obj ? Math.min(obj.animateIn, newDuration) : undefined
         dispatch({
           type: 'UPDATE_OBJECT',
@@ -170,8 +177,13 @@ export default function Timeline({
           updates: { startTime: newStart, duration: newDuration, ...(clampedAnimateIn !== undefined && { animateIn: clampedAnimateIn }) },
         })
       } else if (dragState.kind === 'resize-right') {
-        const newDuration = Math.round(Math.max(0.1, dragState.originalDuration + dt) * 10) / 10
+        let newDuration = Math.round(Math.max(0.1, dragState.originalDuration + dt) * 10) / 10
         const obj = objects.find((o) => o.id === dragState.objectId)
+        // Clamp duration for audio/video to respect 0.25x–4x playback rate
+        if (obj && (obj.type === 'audio' || obj.type === 'video')) {
+          const origDur = (obj.data as AudioData | VideoData).originalDuration
+          newDuration = Math.max(origDur / 4, Math.min(origDur * 4, newDuration))
+        }
         const clampedAnimateIn = obj ? Math.min(obj.animateIn, newDuration) : undefined
         dispatch({
           type: 'UPDATE_OBJECT',
@@ -179,9 +191,9 @@ export default function Timeline({
           updates: { duration: newDuration, ...(clampedAnimateIn !== undefined && { animateIn: clampedAnimateIn }) },
         })
       } else if (dragState.kind === 'resize-animate-in') {
-        const newAnimateIn = Math.max(0.1, dragState.originalAnimateIn + dt)
+        const newAnimateIn = Math.round(Math.max(0.1, dragState.originalAnimateIn + dt) * 10) / 10
         // If animateIn exceeds duration, expand duration to fit
-        const newDuration = Math.max(dragState.originalDuration, newAnimateIn)
+        const newDuration = Math.round(Math.max(dragState.originalDuration, newAnimateIn) * 10) / 10
         dispatch({
           type: 'UPDATE_OBJECT',
           objectId: dragState.objectId,
@@ -401,7 +413,20 @@ export default function Timeline({
                         })
                       }}
                     >
-                      <span className="text-[10px] text-white px-1 truncate leading-[32px] pointer-events-none">
+                      {/* Waveform background for audio clips */}
+                      {obj.type === 'audio' && (obj.data as AudioData).waveform && (
+                        <div className="absolute inset-0 flex items-end pointer-events-none opacity-30">
+                          {(obj.data as AudioData).waveform!.map((peak, wi) => (
+                            <div
+                              key={wi}
+                              className="flex-1 bg-white"
+                              style={{ height: `${peak * 100}%`, minWidth: 0 }}
+                            />
+                          ))}
+                        </div>
+                      )}
+
+                      <span className="relative text-[10px] text-white px-1 truncate leading-[32px] pointer-events-none">
                         <span className="font-bold">{obj.name}</span>
                         {' '}
                         <span className="opacity-70">[{formatTime(obj.startTime)} - {formatTime(obj.startTime + obj.duration)}]</span>
