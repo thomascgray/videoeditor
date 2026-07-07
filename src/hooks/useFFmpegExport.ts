@@ -13,14 +13,15 @@ export function useFFmpegExport() {
     setError(null)
 
     try {
-      const blob = await exportVideo(project, 'webm', (pct) => {
+      const blob = await exportVideo(project, (pct) => {
         setProgress(pct)
       })
 
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
-      a.download = `${project.name.replace(/\s+/g, '-').toLowerCase()}.webm`
+      const ext = blob.type === 'video/mp4' ? 'mp4' : 'webm'
+      a.download = `${project.name.replace(/\s+/g, '-').toLowerCase()}.${ext}`
       a.click()
       URL.revokeObjectURL(url)
     } catch (e) {

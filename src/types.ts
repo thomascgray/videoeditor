@@ -122,7 +122,7 @@ export type ProjectAction =
 export function createDefaultProject(): Project {
   return {
     id: crypto.randomUUID(),
-    name: 'Untitled Battle Report',
+    name: 'Untitled Project',
     fps: 30,
     width: 1920,
     height: 1080,

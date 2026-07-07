@@ -2,7 +2,7 @@
 
 ## Overview
 
-Replace the current HTMLVideoElement-seeking + MediaRecorder export pipeline with WebCodecs API (`VideoDecoder` / `VideoEncoder`) for dramatically faster, frame-accurate video export. Also improve the live preview scrubbing for video clips using sequential decoding.
+Replace the current HTMLVideoElement-seeking + MediaRecorder export pipeline with WebCodecs API (`VideoDecoder` / `VideoEncoder`) for dramatically faster, frame-accurate video export. Output MP4 (H.264 + AAC). Run the export pipeline in a Web Worker with OffscreenCanvas for full UI responsiveness.
 
 The existing compositing system (`renderFrame` in `renderer.ts`) which handles all annotation types (arrows, text, shapes, freehand, photos) composited via Canvas2D must continue working unchanged — this refactor only replaces how video frames are sourced and how the final output is encoded.
 
@@ -13,7 +13,7 @@ The existing compositing system (`renderFrame` in `renderer.ts`) which handles a
 **Current approach:** `HTMLVideoElement` + `video.currentTime = X` + `await seeked` event + `ctx.drawImage(video)`. Slow because each seek may decode up to 30 frames internally (GOP size).
 
 **New approach:**
-- Demux source video files using a demuxer library (MP4Box.js or web-demuxer)
+- Demux source MP4 files using MP4Box.js
 - Decode frames sequentially using `VideoDecoder` → `VideoFrame` objects
 - Pass `VideoFrame` directly to `ctx.drawImage(videoFrame, ...)` (it's a valid `CanvasImageSource`)
 - Call `frame.close()` after every draw to release GPU memory
@@ -29,7 +29,7 @@ This applies to:
 **New approach:**
 - Create `VideoFrame` from composited canvas: `new VideoFrame(canvas, { timestamp })`
 - Encode with `VideoEncoder` → `EncodedVideoChunk` objects
-- Mux with **mp4-muxer** or **webm-muxer** to produce final file
+- Mux with **mp4-muxer** to produce MP4 file
 - No real-time constraint — encode as fast as the hardware allows (5-20x faster than real-time)
 
 ### 3. Preserve All Existing Compositing
@@ -52,13 +52,9 @@ The `OfflineAudioContext` pre-render approach for audio mixing should remain as-
 - **Current:** Audio buffer → `AudioContext` → `MediaStreamAudioDestinationNode` → combined `MediaStream` → `MediaRecorder`
 - **New:** Audio buffer → encode with `AudioEncoder` (or directly mux PCM) → muxer alongside video chunks
 
-### 5. Output Format Options
+### 5. Output Format
 
-With WebCodecs + a muxer, we can support:
-- **MP4 (H.264 + AAC)** — universally compatible, better for sharing
-- **WebM (VP9 + Opus)** — current format, open source
-
-The user should be able to choose format in the Export Modal.
+MP4 (H.264 + AAC) is the only output format. Universally compatible, better for sharing. WebM output can be added later via `webm-muxer` if needed.
 
 ### 6. Graceful Fallback
 
@@ -71,29 +67,17 @@ const hasWebCodecs = typeof VideoDecoder !== 'undefined' && typeof VideoEncoder 
 
 ### Demuxer Selection
 
-Two main options for extracting `EncodedVideoChunk` from container formats:
-
-**Option A: MP4Box.js** (recommended to start)
+**MP4Box.js** — MP4 demuxing only.
 - Mature, widely used, JS-native (no WASM)
 - Generates `VideoDecoderConfig` and `EncodedVideoChunk` compatible with WebCodecs
 - Used in official W3C WebCodecs samples
-- Only supports MP4 containers
 - ~50KB gzipped
 
-**Option B: web-demuxer** (by Bilibili)
-- WASM-based, supports MP4, MKV, WebM, AVI, FLV, MPEG-TS
-- Designed for WebCodecs — provides `getDecoderConfig()`, `seek()`, `read()`
-- 493KB gzipped (mini build for MP4/MKV/WebM)
-- Better multi-format support, heavier bundle
-
-**Recommendation:** Start with MP4Box.js for MP4 support. Users likely import MP4 clips. Can add web-demuxer later for broader format support.
+Can expand to multi-format demuxing (web-demuxer) or local format conversion later if needed.
 
 ### Muxer Selection
 
-**mp4-muxer** (for MP4 output) — npm package, produces MP4 with H.264 video + AAC audio
-**webm-muxer** (for WebM output) — npm package, produces WebM with VP8/VP9 video + Opus audio
-
-Both accept `EncodedVideoChunk` / `EncodedAudioChunk` from WebCodecs directly.
+**mp4-muxer** — npm package, produces MP4 with H.264 video + AAC audio. Accepts `EncodedVideoChunk` / `EncodedAudioChunk` from WebCodecs directly.
 
 ### New Dependencies
 
@@ -101,7 +85,6 @@ Both accept `EncodedVideoChunk` / `EncodedAudioChunk` from WebCodecs directly.
 |---------|---------|------|
 | `mp4box` | Demux MP4 source videos | ~50KB gz |
 | `mp4-muxer` | Mux MP4 output | ~15KB gz |
-| `webm-muxer` | Mux WebM output | ~12KB gz |
 
 Remove unused FFmpeg deps: `@ffmpeg/core`, `@ffmpeg/ffmpeg`, `@ffmpeg/util`
 
@@ -181,7 +164,7 @@ Phase 3: Frame-by-frame compositing + encoding
   AudioEncoder encodes the pre-rendered audio buffer in parallel
 
 Phase 4: Mux
-  [EncodedVideoChunks + EncodedAudioChunks] → [mp4-muxer / webm-muxer] → [Blob]
+  [EncodedVideoChunks + EncodedAudioChunks] → [mp4-muxer] → [Blob]
 ```
 
 ### Live Preview Pipeline (Scrubbing)
@@ -219,10 +202,11 @@ For export:
 | `src/lib/ffmpegExport.ts` | Major rewrite: replace MediaRecorder with VideoEncoder + muxer, replace HTMLVideoElement seeking with VideoDecoder streaming |
 | `src/lib/renderer.ts` | Minor: add `VideoFrame` to imageCache type union, update `drawImageCover` dimension detection |
 | `src/hooks/useCanvasRenderer.ts` | No change for Option A (keep HTMLVideoElement for preview) |
-| `src/hooks/useFFmpegExport.ts` | Update to support format selection, download `.mp4` or `.webm` |
-| `src/components/ExportModal.tsx` | Add format selector (MP4 / WebM) |
+| `src/hooks/useFFmpegExport.ts` | Update to download `.mp4`, communicate with Web Worker |
+| `src/components/ExportModal.tsx` | Update to reflect MP4-only output |
 | NEW `src/lib/videoDecoder.ts` | Demux + decode pipeline: takes a Blob, yields VideoFrames on demand |
-| `package.json` | Add `mp4box`, `mp4-muxer`, `webm-muxer`; remove `@ffmpeg/core`, `@ffmpeg/ffmpeg`, `@ffmpeg/util` |
+| NEW `src/lib/exportWorker.ts` | Web Worker: runs decode/encode/compositing pipeline off main thread |
+| `package.json` | Add `mp4box`, `mp4-muxer`; remove `@ffmpeg/core`, `@ffmpeg/ffmpeg`, `@ffmpeg/util` |
 
 ### Existing Code Notes
 
@@ -239,13 +223,13 @@ For export:
 - Renderer: `src/lib/renderer.ts` — the compositing core that MUST remain working
 - Asset store: `src/lib/assetStore.ts` — provides `getAssetBlob()` for raw video file access
 
-## Open Questions
+## Resolved Questions
 
-1. **MP4 only or multi-format demuxing?** Should we only support MP4 source clips (MP4Box.js) or also WebM/MKV/etc (web-demuxer)? MP4 is simpler and covers 95% of cases. Users importing WebM clips would need the heavier demuxer.
+1. **MP4 only for demuxing.** Use MP4Box.js only. Covers ~95% of cases, much simpler. Can expand to multi-format (web-demuxer) later if needed — or add local format conversion as an alternative path.
 
-2. **Output format default:** Should MP4 be the new default output format (more universally compatible) or keep WebM as default?
+2. **MP4 only for output.** MP4 (H.264 + AAC) is the only output format for now. More universally compatible. WebM output can be added later.
 
-3. **Worker-based export?** Moving the decode/encode pipeline to a Web Worker with OffscreenCanvas would keep the UI fully responsive during export and avoid background tab throttling. Worth the added complexity?
+3. **Yes to Worker-based export.** The project is early/WIP — now is the right time to make this architectural decision before more code depends on the main-thread export path. Run the decode/encode/compositing pipeline in a Web Worker with OffscreenCanvas.
 
 ## Acceptance Criteria
 
@@ -253,10 +237,9 @@ For export:
 - [ ] Video clips in export show correct frames at correct times (frame-accurate)
 - [ ] Audio mixing continues to work (audio clips, video audio tracks, volume, playback rate)
 - [ ] Export is significantly faster than current approach (target: 3-10x for projects with video clips)
-- [ ] MP4 output option available (H.264 + AAC)
-- [ ] WebM output option still available
-- [ ] Format selector in Export Modal
+- [ ] MP4 output (H.264 + AAC) is the default and only format
 - [ ] Graceful fallback to MediaRecorder on browsers without WebCodecs
+- [ ] Export runs in a Web Worker (OffscreenCanvas) — UI stays responsive
 - [ ] No GPU memory leaks (all VideoFrames properly closed)
 - [ ] Progress reporting still works during export
 - [ ] Unused FFmpeg dependencies removed from package.json
@@ -273,11 +256,11 @@ For export:
 - Test: can decode a video and draw frames to canvas
 
 **Phase 2: Video Encoder + Muxer Pipeline**
-- Add `mp4-muxer` and `webm-muxer` dependencies
-- Replace MediaRecorder in `ffmpegExport.ts` with VideoEncoder → muxer
+- Add `mp4-muxer` dependency
+- Replace MediaRecorder in `ffmpegExport.ts` with VideoEncoder → mp4-muxer
 - Compositing loop: `renderFrame()` → `new VideoFrame(canvas)` → `encoder.encode(frame)` → muxer
 - Remove the `setTimeout(1000/fps)` delay — encode as fast as possible
-- Test: export produces correct MP4/WebM with annotations
+- Test: export produces correct MP4 with annotations
 
 **Phase 3: Integrate Decoded Frames into Export**
 - During export, use the new decoder pipeline for video clip frames instead of HTMLVideoElement seeking
@@ -290,19 +273,20 @@ For export:
 - Mux audio + video tracks together
 - Test: export produces correct audio
 
-**Phase 5: UI + Cleanup**
-- Add format selector to ExportModal (MP4 / WebM)
-- Add WebCodecs feature detection + fallback
+**Phase 5: Web Worker Export**
+- Move the decode/encode/compositing pipeline into a Web Worker
+- Use OffscreenCanvas for rendering inside the worker
+- Main thread sends project data + asset blobs to worker, receives progress updates + final blob
+- Keeps UI fully responsive during export, avoids background tab throttling
+
+**Phase 6: UI + Cleanup**
+- Add WebCodecs feature detection + fallback to MediaRecorder
 - Remove unused `@ffmpeg/*` dependencies
 - Update `drawImageCover` to handle `VideoFrame` dimensions
-- Update ExportModal to show format info
+- Update ExportModal to reflect MP4-only output
 
 ### Future Enhancements (Out of Scope)
 - WebCodecs-based live preview (replace HTMLVideoElement seeking in editor)
-- Web Worker export pipeline (OffscreenCanvas + decoder/encoder in worker)
-- Multi-format demuxing (web-demuxer for WebM/MKV sources)
+- Multi-format demuxing (web-demuxer for WebM/MKV sources) or local format conversion
+- WebM output format option
 - Hardware acceleration selection (prefer GPU encoders)
-
----
-
-*This specification has open questions that should be resolved before implementation. See the Open Questions section above.*

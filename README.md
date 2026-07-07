@@ -1,6 +1,6 @@
-# Warhammer Battle Report Editor
+# Video Editor
 
-A browser-based video editor for creating Warhammer battle report videos from photos. Import your battle photos, annotate them with arrows, text, and shapes (each with their own draw-on animations and timing), preview the result in real time, and export as MP4.
+A browser-based video editor for creating videos from photos. Import your photos, annotate them with arrows, text, and shapes (each with their own draw-on animations and timing), preview the result in real time, and export as MP4.
 
 Entirely client-side — no server required.
 
