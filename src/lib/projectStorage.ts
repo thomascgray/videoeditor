@@ -3,7 +3,7 @@ import type { Project } from '../types'
 import { createDefaultProject } from '../types'
 import { getAssetBlob, storeAssetBlob } from './assetStore'
 
-const STORAGE_KEY = 'battle-report-project'
+const STORAGE_KEY = 'video-editor-project'
 
 export function saveProject(project: Project): void {
   try {

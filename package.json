@@ -1,5 +1,5 @@
 {
-  "name": "battle-report-editor",
+  "name": "video-editor",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -10,11 +10,10 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@ffmpeg/core": "^0.12.10",
-    "@ffmpeg/ffmpeg": "^0.12.15",
-    "@ffmpeg/util": "^0.12.2",
     "@tailwindcss/vite": "^4.2.1",
     "jszip": "^3.10.1",
+    "mp4-muxer": "^5.2.2",
+    "mp4box": "^2.3.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "tailwindcss": "^4.2.1"

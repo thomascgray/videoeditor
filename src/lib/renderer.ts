@@ -23,7 +23,7 @@ export function renderFrame(
   objects: TimelineObject[],
   globalTime: number,
   options: { width: number; height: number },
-  imageCache: Map<string, HTMLImageElement | HTMLVideoElement | ImageBitmap>,
+  imageCache: Map<string, HTMLImageElement | HTMLVideoElement | ImageBitmap | VideoFrame>,
   editorOptions?: EditorOptions,
 ) {
   const { width: w, height: h } = options
@@ -71,7 +71,7 @@ function drawObject(
   progress: number,
   w: number,
   h: number,
-  imageCache: Map<string, HTMLImageElement | HTMLVideoElement | ImageBitmap>,
+  imageCache: Map<string, HTMLImageElement | HTMLVideoElement | ImageBitmap | VideoFrame>,
   styleOverride?: ObjectStyle,
 ) {
   const style = styleOverride ?? obj.style
@@ -144,14 +144,19 @@ function drawObject(
  */
 function drawImageCover(
   ctx: CanvasRenderingContext2D,
-  img: HTMLImageElement | HTMLVideoElement | ImageBitmap,
+  img: HTMLImageElement | HTMLVideoElement | ImageBitmap | VideoFrame,
   dx: number,
   dy: number,
   dw: number,
   dh: number,
 ) {
-  const imgW = img instanceof HTMLVideoElement ? img.videoWidth : img.width
-  const imgH = img instanceof HTMLVideoElement ? img.videoHeight : img.height
+  // Use duck-typing for DOM types so this works in Web Workers too
+  const imgW = img instanceof VideoFrame ? img.displayWidth
+    : 'videoWidth' in img ? (img as HTMLVideoElement).videoWidth
+    : img.width
+  const imgH = img instanceof VideoFrame ? img.displayHeight
+    : 'videoHeight' in img ? (img as HTMLVideoElement).videoHeight
+    : img.height
   if (imgW === 0 || imgH === 0) return
   const imgRatio = imgW / imgH
   const targetRatio = dw / dh

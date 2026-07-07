@@ -23,7 +23,7 @@ export default function ExportModal({ project, onClose }: ExportModalProps) {
         <div className="space-y-3 mb-6 text-sm text-gray-300">
           <div className="flex justify-between">
             <span>Format</span>
-            <span>WebM (VP9)</span>
+            <span>MP4 (H.264)</span>
           </div>
           <div className="flex justify-between">
             <span>Resolution</span>
@@ -72,7 +72,7 @@ export default function ExportModal({ project, onClose }: ExportModalProps) {
             disabled={isExporting || project.objects.length === 0}
             className="flex-1 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-medium rounded transition-colors cursor-pointer"
           >
-            {isExporting ? 'Exporting...' : 'Export WebM'}
+            {isExporting ? 'Exporting...' : 'Export MP4'}
           </button>
         </div>
       </div>
