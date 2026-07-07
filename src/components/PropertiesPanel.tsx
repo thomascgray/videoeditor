@@ -1,4 +1,4 @@
-import type { TimelineObject, ProjectAction, ArrowData, AudioData, VideoData } from '../types'
+import type { TimelineObject, ProjectAction, ArrowData, AudioData, VideoData, TextData } from '../types'
 
 type PropertiesPanelProps = {
   object: TimelineObject | null
@@ -138,6 +138,59 @@ export default function PropertiesPanel({ object: obj, dispatch }: PropertiesPan
               <NumberInput value={obj.style.fontSize ?? 32} min={8} max={200} step={1} onChange={(v) => updateStyle({ fontSize: v })} />
             </Field>
           )}
+        </Section>
+      )}
+
+      {/* Text-specific */}
+      {obj.type === 'text' && (
+        <Section title="Text">
+          <textarea
+            value={(obj.data as TextData).content}
+            onChange={(e) => update({ data: { ...(obj.data as TextData), content: e.target.value } })}
+            rows={3}
+            placeholder="Enter text…"
+            className="w-full bg-gray-800 text-white text-xs px-2 py-1 rounded border border-gray-700 focus:border-indigo-500 outline-none resize-y"
+          />
+          <Field label="Font">
+            <select
+              value={obj.style.fontFamily ?? 'sans-serif'}
+              onChange={(e) => updateStyle({ fontFamily: e.target.value })}
+              className="bg-gray-800 text-white text-xs px-2 py-1 rounded border border-gray-700 focus:border-indigo-500 outline-none cursor-pointer"
+            >
+              <option value="sans-serif">Sans</option>
+              <option value="serif">Serif</option>
+              <option value="monospace">Mono</option>
+            </select>
+          </Field>
+          <Field label="Bold">
+            <input
+              type="checkbox"
+              checked={(obj.style.fontWeight ?? 'bold') === 'bold'}
+              onChange={(e) => updateStyle({ fontWeight: e.target.checked ? 'bold' : 'normal' })}
+              className="accent-indigo-500 cursor-pointer"
+            />
+          </Field>
+          <Field label="Background">
+            <div className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={(obj.data as TextData).background != null}
+                onChange={(e) => {
+                  const data = obj.data as TextData
+                  update({ data: { ...data, background: e.target.checked ? (data.background ?? '#000000') : undefined } })
+                }}
+                className="accent-indigo-500 cursor-pointer"
+              />
+              {(obj.data as TextData).background != null && (
+                <input
+                  type="color"
+                  value={(obj.data as TextData).background ?? '#000000'}
+                  onChange={(e) => update({ data: { ...(obj.data as TextData), background: e.target.value } })}
+                  className="w-8 h-6 bg-transparent border-none cursor-pointer"
+                />
+              )}
+            </div>
+          </Field>
         </Section>
       )}
 

@@ -183,34 +183,47 @@ export function drawText(
   scaleFactor: number,
 ) {
   const fontSize = (style.fontSize ?? 32) * scaleFactor
+  const lineHeight = fontSize * 1.25
 
   ctx.save()
-  ctx.globalAlpha = style.opacity * progress
+  ctx.globalAlpha = style.opacity
   ctx.font = `${style.fontWeight ?? 'bold'} ${fontSize}px ${style.fontFamily ?? 'sans-serif'}`
+  ctx.textBaseline = 'middle'
+  ctx.textAlign = 'center'
 
-  const visibleText = data.content.substring(0, Math.floor(progress * data.content.length) || data.content.length)
+  const full = data.content ?? ''
+  // Typewriter reveal: round so progress=1 shows the whole string and
+  // progress=0 shows nothing (no whole-word flash on the first frame).
+  const charCount = Math.max(0, Math.min(full.length, Math.round(progress * full.length)))
+  const visibleText = full.substring(0, charCount)
 
-  // Text is drawn centered in the bounding box
+  const visibleLines = visibleText.split('\n')
   const x = bx + bw / 2
-  const y = by + bh / 2
+  const cy = by + bh / 2
 
-  // Draw background if specified
+  // Draw background sized to the FINAL text so the box doesn't grow as
+  // letters type on.
   if (data.background) {
-    const metrics = ctx.measureText(visibleText)
+    const allLines = full.split('\n')
+    let maxW = 0
+    for (const line of allLines) maxW = Math.max(maxW, ctx.measureText(line).width)
     const padding = (data.padding ?? 8) * scaleFactor
+    const boxH = allLines.length * lineHeight
     ctx.fillStyle = data.background
     ctx.fillRect(
-      x - metrics.width / 2 - padding,
-      y - fontSize / 2 - padding,
-      metrics.width + padding * 2,
-      fontSize + padding * 2,
+      x - maxW / 2 - padding,
+      cy - boxH / 2 - padding,
+      maxW + padding * 2,
+      boxH + padding * 2,
     )
   }
 
   ctx.fillStyle = style.color
-  ctx.textBaseline = 'middle'
-  ctx.textAlign = 'center'
-  ctx.fillText(visibleText, x, y)
+  const totalH = (visibleLines.length - 1) * lineHeight
+  const startY = cy - totalH / 2
+  visibleLines.forEach((line, i) => {
+    ctx.fillText(line, x, startY + i * lineHeight)
+  })
   ctx.restore()
 }
 
