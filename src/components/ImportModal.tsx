@@ -3,7 +3,6 @@ import type { TimelineObject, AssetMeta } from "../types";
 import { createTimelineObject } from "../types";
 import {
   storeAsset,
-  getAssetUrl,
   getMediaDuration,
   generateWaveform,
   getTotalAssetSize,

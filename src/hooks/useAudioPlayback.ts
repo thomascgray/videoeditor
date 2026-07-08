@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import type { TimelineObject, AudioData, VideoData } from '../types'
 import { getAssetUrl } from '../lib/assetStore'
+import { registerVideoElement, unregisterVideoElement } from '../lib/mediaRegistry'
 
 type MediaEntry = {
   objectId: string
@@ -77,6 +78,13 @@ export function useAudioPlayback(
       const rate = data.originalDuration / obj.duration
       el.playbackRate = Math.max(0.25, Math.min(4, rate))
 
+      // Video elements double as the canvas image source (A2). playsInline lets a
+      // detached element decode frames; register it so useCanvasRenderer can draw it.
+      if (obj.type === 'video') {
+        ;(el as HTMLVideoElement).playsInline = true
+        registerVideoElement(obj.id, el as HTMLVideoElement)
+      }
+
       entries.set(obj.id, {
         objectId: obj.id,
         assetId: data.assetId,
@@ -91,6 +99,7 @@ export function useAudioPlayback(
       if (!currentIds.has(id)) {
         entry.element.pause()
         entry.element.src = ''
+        unregisterVideoElement(id)
         entries.delete(id)
       }
     }
@@ -166,12 +175,14 @@ export function useAudioPlayback(
 
   // Cleanup on unmount
   useEffect(() => {
+    const entries = entriesRef.current
     return () => {
-      for (const entry of entriesRef.current.values()) {
+      for (const entry of entries.values()) {
         entry.element.pause()
         entry.element.src = ''
+        unregisterVideoElement(entry.objectId)
       }
-      entriesRef.current.clear()
+      entries.clear()
     }
   }, [])
 

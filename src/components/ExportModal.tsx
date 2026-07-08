@@ -7,7 +7,7 @@ type ExportModalProps = {
 }
 
 export default function ExportModal({ project, onClose }: ExportModalProps) {
-  const { isExporting, progress, error, startExport } = useFFmpegExport()
+  const { isExporting, progress, error, startExport, cancelExport } = useFFmpegExport()
 
   return (
     <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
@@ -61,11 +61,10 @@ export default function ExportModal({ project, onClose }: ExportModalProps) {
 
         <div className="flex gap-3">
           <button
-            onClick={onClose}
-            disabled={isExporting}
-            className="flex-1 px-4 py-2 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 text-white rounded transition-colors cursor-pointer"
+            onClick={isExporting ? cancelExport : onClose}
+            className="flex-1 px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded transition-colors cursor-pointer"
           >
-            Cancel
+            {isExporting ? 'Cancel export' : 'Close'}
           </button>
           <button
             onClick={() => startExport(project)}

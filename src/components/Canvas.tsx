@@ -2,7 +2,7 @@ import { useRef, useEffect, useState, useCallback, useMemo } from 'react'
 import type { TimelineObject, InteractionMode, ProjectAction, ArrowData, FreehandData } from '../types'
 import { useCanvasRenderer } from '../hooks/useCanvasRenderer'
 import type { EditorOptions } from '../lib/renderer'
-import { segmentControlPoint, quadBezierAt } from '../lib/annotations'
+import { segmentControlPoint } from '../lib/annotations'
 
 const ARROW_MAX_POINTS = 10
 
@@ -48,6 +48,7 @@ type DragState =
 type CanvasProps = {
   objects: TimelineObject[]
   globalTime: number
+  isPlaying: boolean
   width: number
   height: number
   selectedObjectId: string | null
@@ -76,18 +77,29 @@ function clientToNorm(
   }
 }
 
-function rotatePoint(
+/**
+ * Rotate a normalized point about a normalized center, performing the rotation
+ * in *pixel* space. Objects are drawn with a pixel-space rotation (see
+ * renderer.ts / drawOverlay), and rotation does not commute with the non-uniform
+ * normalized→pixel scaling on a non-square canvas — so hit-testing must rotate
+ * in pixel space too, otherwise the hit-regions drift from the drawn shape.
+ */
+function rotatePointAspect(
   px: number,
   py: number,
   cx: number,
   cy: number,
   angle: number,
+  canvasW: number,
+  canvasH: number,
 ): { x: number; y: number } {
   const cos = Math.cos(angle)
   const sin = Math.sin(angle)
-  const dx = px - cx
-  const dy = py - cy
-  return { x: cx + dx * cos - dy * sin, y: cy + dx * sin + dy * cos }
+  const dxPx = (px - cx) * canvasW
+  const dyPx = (py - cy) * canvasH
+  const rxPx = dxPx * cos - dyPx * sin
+  const ryPx = dxPx * sin + dyPx * cos
+  return { x: cx + rxPx / canvasW, y: cy + ryPx / canvasH }
 }
 
 /** Transform a point into object-local space (undo rotation around object center) */
@@ -95,10 +107,12 @@ function normToObjectLocal(
   nx: number,
   ny: number,
   obj: TimelineObject,
+  canvasW: number,
+  canvasH: number,
 ): { lx: number; ly: number } {
   const cx = obj.x + obj.width / 2
   const cy = obj.y + obj.height / 2
-  const p = rotatePoint(nx, ny, cx, cy, -obj.rotation)
+  const p = rotatePointAspect(nx, ny, cx, cy, -obj.rotation, canvasW, canvasH)
   return { lx: p.x, ly: p.y }
 }
 
@@ -107,8 +121,10 @@ function normToObjectBbox(
   nx: number,
   ny: number,
   obj: TimelineObject,
+  canvasW: number,
+  canvasH: number,
 ): { bx: number; by: number } {
-  const { lx, ly } = normToObjectLocal(nx, ny, obj)
+  const { lx, ly } = normToObjectLocal(nx, ny, obj, canvasW, canvasH)
   return {
     bx: obj.width !== 0 ? (lx - obj.x) / obj.width : 0,
     by: obj.height !== 0 ? (ly - obj.y) / obj.height : 0,
@@ -117,8 +133,14 @@ function normToObjectBbox(
 
 // === Hit Testing ===
 
-function hitTestObject(nx: number, ny: number, obj: TimelineObject): boolean {
-  const { lx, ly } = normToObjectLocal(nx, ny, obj)
+function hitTestObject(
+  nx: number,
+  ny: number,
+  obj: TimelineObject,
+  canvasW: number,
+  canvasH: number,
+): boolean {
+  const { lx, ly } = normToObjectLocal(nx, ny, obj, canvasW, canvasH)
   return (
     lx >= obj.x &&
     lx <= obj.x + obj.width &&
@@ -134,7 +156,7 @@ function hitTestHandles(
   canvasW: number,
   canvasH: number,
 ): HandleId | 'rotate' | null {
-  const { lx, ly } = normToObjectLocal(nx, ny, obj)
+  const { lx, ly } = normToObjectLocal(nx, ny, obj, canvasW, canvasH)
 
   // Hit radius in normalized coords
   const hrx = HANDLE_HIT_RADIUS / canvasW
@@ -177,15 +199,20 @@ function computeResize(
   startNx: number,
   startNy: number,
   orig: { x: number; y: number; w: number; h: number; rotation: number },
+  canvasW: number,
+  canvasH: number,
 ): { x: number; y: number; width: number; height: number } {
   const cos = Math.cos(orig.rotation)
   const sin = Math.sin(orig.rotation)
 
-  // Project mouse delta onto object's local axes
-  const rawDx = mouseNx - startNx
-  const rawDy = mouseNy - startNy
-  const localDx = rawDx * cos + rawDy * sin
-  const localDy = -rawDx * sin + rawDy * cos
+  // Project mouse delta onto the object's local axes, in *pixel* space (the
+  // object is rotated in pixel space), then convert the local deltas back to
+  // normalized width/height changes. On a non-square canvas this differs from a
+  // plain normalized-space projection by the aspect factors below.
+  const dxPx = (mouseNx - startNx) * canvasW
+  const dyPx = (mouseNy - startNy) * canvasH
+  const localDx = (dxPx * cos + dyPx * sin) / canvasW
+  const localDy = (-dxPx * sin + dyPx * cos) / canvasH
 
   let nx = orig.x,
     ny = orig.y,
@@ -259,19 +286,23 @@ function computeResize(
     anchorY = ny + nh / 2
   }
 
-  const anchorOldWorld = rotatePoint(
+  const anchorOldWorld = rotatePointAspect(
     anchorX,
     anchorY,
     oldCx,
     oldCy,
     orig.rotation,
+    canvasW,
+    canvasH,
   )
-  const anchorNewWorld = rotatePoint(
+  const anchorNewWorld = rotatePointAspect(
     anchorX,
     anchorY,
     newCx,
     newCy,
     orig.rotation,
+    canvasW,
+    canvasH,
   )
 
   nx += anchorOldWorld.x - anchorNewWorld.x
@@ -317,6 +348,7 @@ function getHandleCursor(
 export default function Canvas({
   objects,
   globalTime,
+  isPlaying,
   width,
   height,
   selectedObjectId,
@@ -337,7 +369,7 @@ export default function Canvas({
     editorMode: true,
     activeDrawingObjectId,
   }), [activeDrawingObjectId])
-  useCanvasRenderer(renderCanvasRef, objects, globalTime, editorOpts)
+  useCanvasRenderer(renderCanvasRef, objects, globalTime, isPlaying, editorOpts)
 
   // Keep dragStateRef in sync for use in event handlers
   dragStateRef.current = dragState
@@ -520,7 +552,7 @@ export default function Canvas({
     if (!selectedObject || selectedObject.type !== 'arrow') return false
     const data = selectedObject.data as ArrowData
     if (data.points.length >= ARROW_MAX_POINTS) return false
-    const { bx, by } = normToObjectBbox(nx, ny, selectedObject)
+    const { bx, by } = normToObjectBbox(nx, ny, selectedObject, width, height)
     const newPoints = [...data.points, { x: bx, y: by }]
     dispatch({
       type: 'UPDATE_OBJECT',
@@ -532,7 +564,7 @@ export default function Canvas({
       onFinishArrow?.()
     }
     return true
-  }, [selectedObject, dispatch, onFinishArrow])
+  }, [selectedObject, dispatch, onFinishArrow, width, height])
 
   const handleMouseDown = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -553,7 +585,7 @@ export default function Canvas({
             addArrowPoint(nx, ny)
           }
         } else {
-          const { bx, by } = normToObjectBbox(nx, ny, selectedObject)
+          const { bx, by } = normToObjectBbox(nx, ny, selectedObject, width, height)
           // Freehand: mousedown starts a new stroke
           const data = selectedObject.data as FreehandData
           const newStrokes = [...data.strokes, [{ x: bx, y: by }]]
@@ -604,7 +636,7 @@ export default function Canvas({
       }
 
       // Hit test on the selected object body for move
-      if (hitTestObject(nx, ny, selectedObject)) {
+      if (hitTestObject(nx, ny, selectedObject, width, height)) {
         setDragState({
           kind: 'move',
           objectId: selectedObject.id,
@@ -659,6 +691,8 @@ export default function Canvas({
               h: ds.origH,
               rotation: ds.rotation,
             },
+            width,
+            height,
           )
           dispatch({
             type: 'UPDATE_OBJECT_TRANSIENT',
@@ -701,7 +735,7 @@ export default function Canvas({
           setCursor(getHandleCursor(handle, selectedObject.rotation))
           return
         }
-        if (hitTestObject(nx, ny, selectedObject)) {
+        if (hitTestObject(nx, ny, selectedObject, width, height)) {
           setCursor('move')
           return
         }
@@ -747,7 +781,7 @@ export default function Canvas({
           w: ds.origW,
           h: ds.origH,
           rotation: ds.rotation,
-        })
+        }, width, height)
         dispatch({
           type: 'UPDATE_OBJECT_TRANSIENT',
           objectId: ds.objectId,
@@ -765,7 +799,7 @@ export default function Canvas({
       } else if (ds.kind === 'draw-freehand') {
         const obj = objects.find((o) => o.id === ds.objectId)
         if (obj) {
-          const { bx, by } = normToObjectBbox(nx, ny, obj)
+          const { bx, by } = normToObjectBbox(nx, ny, obj, width, height)
           const data = obj.data as FreehandData
           const lastStroke = data.strokes[data.strokes.length - 1]
           const newStrokes = [
@@ -792,7 +826,7 @@ export default function Canvas({
       window.removeEventListener('mousemove', onMove)
       window.removeEventListener('mouseup', onUp)
     }
-  }, [dragState, dispatch, objects])
+  }, [dragState, dispatch, objects, width, height])
 
   // --- Right-click: finish arrow drawing ---
   const handleContextMenu = useCallback(
@@ -809,9 +843,8 @@ export default function Canvas({
   )
 
   // --- Double-click: place final point and finish ---
-  const dblClickTimerRef = useRef<number | null>(null)
   const handleDoubleClick = useCallback(
-    (e: React.MouseEvent<HTMLCanvasElement>) => {
+    () => {
       if (interactionMode === 'draw' && selectedObject?.type === 'arrow') {
         // The two mousedown events already added two points — remove the extra one
         const data = selectedObject.data as ArrowData

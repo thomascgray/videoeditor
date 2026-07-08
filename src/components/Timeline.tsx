@@ -432,8 +432,9 @@ export default function Timeline({
                         <span className="opacity-70">[{formatTime(obj.startTime)} - {formatTime(obj.startTime + obj.duration)}]</span>
                       </span>
 
-                      {/* AnimateIn sub-bar for drawable types */}
-                      {obj.animateIn > 0 && (obj.type === 'arrow' || obj.type === 'freehand') ? (() => {
+                      {/* AnimateIn sub-bar: any object with a draw-on / type-on animation
+                          (arrows, freehand, text, shapes — everything except media). */}
+                      {obj.animateIn > 0 && obj.type !== 'photo' && obj.type !== 'audio' && obj.type !== 'video' ? (() => {
                         // Cap sub-bar so it never covers the parent's resize handles (6px reserved each side)
                         const pct = (obj.animateIn / obj.duration) * 100
                         const maxPx = width - 6

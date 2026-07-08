@@ -1,31 +1,54 @@
 import { useEffect, useRef, useCallback } from 'react'
-import type { TimelineObject, PhotoData, VideoData } from '../types'
+import type { TimelineObject, PhotoData } from '../types'
 import { renderFrame, loadImage } from '../lib/renderer'
 import { getAssetUrl } from '../lib/assetStore'
+import { getVideoElement } from '../lib/mediaRegistry'
 import type { EditorOptions } from '../lib/renderer'
 
+/**
+ * Draws the timeline onto a canvas.
+ *
+ * Photos are loaded/cached here. Video frames come from the shared PLAYING
+ * elements owned by useAudioPlayback (via mediaRegistry) — the canvas never
+ * seeks them. While playing, a rAF loop blits each element's current frame, so
+ * the canvas stays smooth and decoupled from React's 60Hz playback state. While
+ * paused, it renders on demand (scrubbing) and after a seek settles.
+ */
 export function useCanvasRenderer(
   canvasRef: React.RefObject<HTMLCanvasElement | null>,
   objects: TimelineObject[],
   globalTime: number,
+  isPlaying: boolean,
   editorOptions?: EditorOptions,
 ) {
-  // Cache holds both HTMLImageElement (photos) and HTMLVideoElement (videos)
+  // Photos cached by assetId; video elements are merged in per-render (by object id).
   const imageCacheRef = useRef<Map<string, HTMLImageElement | HTMLVideoElement>>(new Map())
-  const renderCountRef = useRef(0)
+  const globalTimeRef = useRef(globalTime)
+  globalTimeRef.current = globalTime
 
   const doRender = useCallback(() => {
     const canvas = canvasRef.current
     if (!canvas) return
     const ctx = canvas.getContext('2d')
     if (!ctx) return
-    renderFrame(ctx, objects, globalTime, {
+
+    // Pull the current video element for each video object from the shared
+    // registry (keyed by object id — matches renderer.ts's lookup).
+    const cache = imageCacheRef.current
+    for (const obj of objects) {
+      if (obj.type === 'video') {
+        const el = getVideoElement(obj.id)
+        if (el) cache.set(obj.id, el)
+      }
+    }
+
+    renderFrame(ctx, objects, globalTimeRef.current, {
       width: canvas.width,
       height: canvas.height,
-    }, imageCacheRef.current, editorOptions)
-  }, [canvasRef, objects, globalTime, editorOptions])
+    }, cache, editorOptions)
+  }, [canvasRef, objects, editorOptions])
 
-  // Load images for photo objects from asset store
+  // Load images for photo objects from the asset store.
   useEffect(() => {
     let cancelled = false
     const cache = imageCacheRef.current
@@ -42,79 +65,47 @@ export function useCanvasRenderer(
         const url = getAssetUrl(assetId)
         if (!url) continue
         try {
-          const img = await loadImage(url)
-          cache.set(assetId, img)
+          cache.set(assetId, await loadImage(url))
         } catch {
           // skip failed images
         }
       }
-      if (!cancelled) {
-        renderCountRef.current++
-        doRender()
-      }
+      if (!cancelled) doRender()
     })()
 
     return () => { cancelled = true }
-  }, [objects, canvasRef, globalTime, doRender])
+  }, [objects, doRender])
 
-  // Load video elements for video objects
+  // Playing: blit the playing video elements' frames via a rAF loop. No seeking,
+  // and independent of React re-render frequency.
   useEffect(() => {
-    const cache = imageCacheRef.current
-    const videoAssetIds = objects
-      .filter((o) => o.type === 'video')
-      .map((o) => (o.data as VideoData).assetId)
-      .filter((id) => !cache.has(id))
-
-    for (const assetId of videoAssetIds) {
-      const url = getAssetUrl(assetId)
-      if (!url) continue
-      const video = document.createElement('video')
-      video.src = url
-      video.muted = true // muted for canvas rendering; audio handled separately
-      video.preload = 'auto'
-      video.playsInline = true
-      cache.set(assetId, video)
+    if (!isPlaying) return
+    let raf = 0
+    const loop = () => {
+      doRender()
+      raf = requestAnimationFrame(loop)
     }
-  }, [objects])
+    raf = requestAnimationFrame(loop)
+    return () => cancelAnimationFrame(raf)
+  }, [isPlaying, doRender])
 
-  // Seek video elements to correct time and render
+  // Paused: render on demand when time / objects / options change (scrubbing).
   useEffect(() => {
-    const cache = imageCacheRef.current
-    let pendingSeeks = 0
-
-    for (const obj of objects) {
-      if (obj.type !== 'video') continue
-      const data = obj.data as VideoData
-      const videoEl = cache.get(data.assetId)
-      if (!videoEl || !(videoEl instanceof HTMLVideoElement)) continue
-
-      const clipStart = obj.startTime
-      const clipEnd = obj.startTime + obj.duration
-      const isActive = globalTime >= clipStart && globalTime < clipEnd
-
-      if (isActive) {
-        // Calculate position within source media
-        const clipProgress = (globalTime - clipStart) / obj.duration
-        const sourceTime = clipProgress * data.originalDuration
-
-        // Only seek if we're out of sync
-        if (Math.abs(videoEl.currentTime - sourceTime) > 0.05) {
-          pendingSeeks++
-          const onSeeked = () => {
-            videoEl.removeEventListener('seeked', onSeeked)
-            pendingSeeks--
-            // Re-render once all seeks complete
-            if (pendingSeeks === 0) {
-              doRender()
-            }
-          }
-          videoEl.addEventListener('seeked', onSeeked)
-          videoEl.currentTime = sourceTime
-        }
-      }
-    }
-
-    // Render immediately (with whatever frame is currently available)
+    if (isPlaying) return
     doRender()
-  }, [objects, globalTime, doRender])
+  }, [isPlaying, globalTime, objects, editorOptions, doRender])
+
+  // Paused: redraw once a scrub-seek settles on a shared element (nearest frame).
+  useEffect(() => {
+    if (isPlaying) return
+    const els = objects
+      .filter((o) => o.type === 'video')
+      .map((o) => getVideoElement(o.id))
+      .filter((el): el is HTMLVideoElement => el != null)
+    if (els.length === 0) return
+
+    const onSeeked = () => doRender()
+    els.forEach((el) => el.addEventListener('seeked', onSeeked))
+    return () => els.forEach((el) => el.removeEventListener('seeked', onSeeked))
+  }, [isPlaying, objects, doRender])
 }

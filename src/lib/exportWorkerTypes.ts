@@ -20,4 +20,6 @@ export type ExportWorkerRequest = {
 export type ExportWorkerResponse =
   | { type: 'progress'; pct: number }
   | { type: 'done'; blob: Blob }
-  | { type: 'error'; message: string }
+  // `recoverable` = the worker couldn't decode (no HTMLVideoElement fallback in a
+  // worker); the main thread should retry on its element-seeking path.
+  | { type: 'error'; message: string; recoverable?: boolean }

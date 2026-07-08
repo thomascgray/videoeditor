@@ -124,7 +124,9 @@ function drawObject(
       break
     case 'video': {
       const vdata = obj.data as VideoData
-      const videoEl = imageCache.get(vdata.assetId)
+      // Export keys decoded frames per object id (per-object decoders); preview
+      // keys HTMLVideoElements by asset id. Prefer object id, fall back to asset id.
+      const videoEl = imageCache.get(obj.id) ?? imageCache.get(vdata.assetId)
       if (videoEl) {
         ctx.globalAlpha = style.opacity * progress
         drawImageCover(ctx, videoEl, bx, by, bw, bh)

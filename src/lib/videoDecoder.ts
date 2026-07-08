@@ -46,6 +46,10 @@ export class VideoFrameSource {
   private flushed: boolean = false
   private error: Error | null = null
 
+  // The frame most recently returned by getFrameAtTime(). Source-owned: retained
+  // across calls (so it can be re-served) and closed here when we advance past it.
+  private currentFrame: VideoFrame | null = null
+
   /** Duration of the video in seconds */
   duration: number = 0
   /** Frames per second (from track metadata) */
@@ -163,46 +167,55 @@ export class VideoFrameSource {
   }
 
   /**
-   * Get the frame at a specific time (seconds).
-   * Decodes sequentially until reaching the target time.
-   * Best used for sequential access (export loop).
+   * Get the source frame whose interval covers `targetTimeSeconds`.
    *
-   * IMPORTANT: Caller MUST call frame.close() when done.
+   * SOURCE-OWNED lifecycle: the returned VideoFrame belongs to this source and
+   * stays valid until the next getFrameAtTime() call or destroy(). The caller
+   * may draw it but MUST NOT close it. Call with non-decreasing target times
+   * (sequential export). The current frame is retained and re-served when
+   * consecutive targets fall within it (output fps > source fps, or clips
+   * rate-stretched slow); overshoot frames are retained, never dropped.
    */
   async getFrameAtTime(targetTimeSeconds: number): Promise<VideoFrame | null> {
+    if (this.error) throw this.error
     const targetUs = targetTimeSeconds * 1_000_000
 
-    let bestFrame: VideoFrame | null = null
-
-    while (true) {
-      const frame = await this.nextFrame()
-      if (!frame) return bestFrame
-
-      // If this frame is past our target, return best so far
-      if (frame.timestamp > targetUs + (frame.duration ?? 0)) {
-        if (bestFrame) {
-          frame.close()
-          return bestFrame
-        }
-        return frame
-      }
-
-      // This frame is a better match — close the previous one
-      if (bestFrame) bestFrame.close()
-      bestFrame = frame
-
-      // If this frame covers the target time, return it
-      const frameDuration = frame.duration ?? 0
-      if (frame.timestamp <= targetUs && frame.timestamp + frameDuration >= targetUs) {
-        return bestFrame
-      }
+    // Prime the first frame on the first call.
+    if (!this.currentFrame) {
+      this.currentFrame = await this.nextFrame()
+      if (!this.currentFrame) return null // stream produced no frames at all
     }
+
+    // Advance while the current frame ends at/before the target AND more frames
+    // exist. Stops on the frame whose interval covers the target, or — if the
+    // target is past the end — the last decoded frame. If the target precedes the
+    // current frame (e.g. source-time 0 with a nonzero starting CTS), the loop
+    // doesn't run and we anchor to the first available frame.
+    while (this.frameEndUs(this.currentFrame) <= targetUs) {
+      const next = await this.nextFrame()
+      if (!next) break // no more frames — keep the last as the best available
+      this.currentFrame.close()
+      this.currentFrame = next
+    }
+
+    return this.currentFrame
+  }
+
+  /** End of a frame's presentation interval, in µs (falls back to nominal fps). */
+  private frameEndUs(frame: VideoFrame): number {
+    const durUs = frame.duration ?? (this.fps > 0 ? 1_000_000 / this.fps : 33_333)
+    return frame.timestamp + durUs
   }
 
   /**
    * Clean up all resources. Call when done with this source.
    */
   destroy(): void {
+    if (this.currentFrame) {
+      this.currentFrame.close()
+      this.currentFrame = null
+    }
+
     for (const frame of this.frameBuffer) {
       frame.close()
     }
@@ -296,9 +309,14 @@ async function demuxMP4(blob: Blob): Promise<DemuxResult> {
       return
     }
 
-    const config = buildDecoderConfig(videoTrack, firstSample)
-    const duration = videoTrack.duration / videoTrack.timescale
-    const frameCount = videoTrack.nb_samples
+    // Re-bind to explicitly-typed consts: TS narrows the closure-assigned `let`s
+    // to `never` after the guard, which it can't see the mp4box callbacks populate.
+    const track: Track = videoTrack
+    const first: Sample = firstSample
+
+    const config = buildDecoderConfig(track, first)
+    const duration = track.duration / track.timescale
+    const frameCount = track.nb_samples
 
     resolve({
       samples: collectedSamples,
@@ -307,8 +325,8 @@ async function demuxMP4(blob: Blob): Promise<DemuxResult> {
         duration,
         fps: duration > 0 ? frameCount / duration : 30,
         frameCount,
-        width: videoTrack.video?.width ?? 0,
-        height: videoTrack.video?.height ?? 0,
+        width: track.video?.width ?? 0,
+        height: track.video?.height ?? 0,
       },
     })
   })
@@ -330,9 +348,14 @@ function getCodecDescription(sample: Sample): ArrayBuffer {
     throw new Error('No codec config box found in sample description. Unsupported codec?')
   }
 
-  const stream = new DataStream(undefined, 0, DataStream.BIG_ENDIAN)
+  // DataStream.BIG_ENDIAN exists at runtime but isn't in mp4box's types.
+  const bigEndian = (DataStream as unknown as { BIG_ENDIAN: number }).BIG_ENDIAN
+  const stream = new DataStream(undefined, 0, bigEndian)
   configBox.write(stream)
-  return (stream.buffer as ArrayBuffer).slice(0, stream.getPosition())
+  // Strip the 8-byte MP4 box header ([size][fourcc]) — VideoDecoder wants ONLY the
+  // AVCDecoderConfigurationRecord. Keeping the header caused "Failed to parse avcC"
+  // and was why the spec-08 decoder was abandoned (root cause validated by the B0 spike).
+  return (stream.buffer as ArrayBuffer).slice(8, stream.getPosition())
 }
 
 function buildDecoderConfig(track: Track, firstSample: Sample): VideoDecoderConfig {

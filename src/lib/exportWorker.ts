@@ -36,6 +36,9 @@ function sendProgress(pct: number) {
   sendMessage({ type: 'progress', pct })
 }
 
+/** Thrown when the worker can't proceed but the main thread might (element fallback). */
+class RecoverableExportError extends Error {}
+
 self.onmessage = async (e: MessageEvent<ExportWorkerRequest>) => {
   const { type } = e.data
   if (type !== 'start') return
@@ -47,6 +50,7 @@ self.onmessage = async (e: MessageEvent<ExportWorkerRequest>) => {
     sendMessage({
       type: 'error',
       message: err instanceof Error ? err.message : 'Export failed',
+      recoverable: err instanceof RecoverableExportError,
     })
   }
 }
@@ -72,9 +76,9 @@ async function runExport(
 
   sendProgress(0)
 
-  // --- Load photos as ImageBitmap + initialize video decoders ---
+  // --- Load photos as ImageBitmap (by assetId) + one decoder per video object ---
   const imageCache = new Map<string, ImageBitmap | VideoFrame>()
-  const videoDecoders = new Map<string, VideoFrameSource>()
+  const videoDecoders = new Map<string, VideoFrameSource>() // keyed by object id (B3)
 
   for (const obj of objects) {
     if (obj.type === 'photo') {
@@ -87,12 +91,18 @@ async function runExport(
         }
       }
     } else if (obj.type === 'video') {
-      const assetId = (obj.data as VideoData).assetId
-      if (!videoDecoders.has(assetId)) {
-        const blob = assetBlobs.get(assetId)
-        if (blob) {
+      const data = obj.data as VideoData
+      const blob = assetBlobs.get(data.assetId)
+      if (blob && !videoDecoders.has(obj.id)) {
+        try {
           const source = await createVideoFrameSource(blob)
-          videoDecoders.set(assetId, source)
+          videoDecoders.set(obj.id, source)
+        } catch (err) {
+          // No HTMLVideoElement fallback exists in a worker — signal the main
+          // thread to retry on its element-seeking path (B5 tier 2).
+          throw new RecoverableExportError(
+            `decoder init failed for "${obj.name}": ${err instanceof Error ? err.message : String(err)}`,
+          )
         }
       }
     }
@@ -100,7 +110,9 @@ async function runExport(
 
   // --- Set up OffscreenCanvas ---
   const canvas = new OffscreenCanvas(width, height)
-  const ctx = canvas.getContext('2d')!
+  // OffscreenCanvasRenderingContext2D shares the drawing API renderFrame uses;
+  // cast so it satisfies renderFrame's CanvasRenderingContext2D parameter.
+  const ctx = canvas.getContext('2d') as unknown as CanvasRenderingContext2D
 
   // Audio is pre-rendered on the main thread (OfflineAudioContext isn't available in workers)
   // and passed in as raw Float32Array channel data
@@ -134,10 +146,10 @@ async function runExport(
     const globalTime = f / fps
     const timestampUs = Math.round(globalTime * 1_000_000)
 
-    // Seek video decoders and put frames in imageCache
+    // Source the current frame for each active clip into imageCache[obj.id].
     for (const obj of videoObjects) {
       const data = obj.data as VideoData
-      const decoder = videoDecoders.get(data.assetId)
+      const decoder = videoDecoders.get(obj.id)
       if (!decoder) continue
 
       const clipStart = obj.startTime
@@ -146,12 +158,9 @@ async function runExport(
         const clipProgress = (globalTime - clipStart) / obj.duration
         const sourceTime = clipProgress * data.originalDuration
 
+        // Frame is owned by the source (valid until the next call); do NOT close it.
         const frame = await decoder.getFrameAtTime(sourceTime)
-        if (frame) {
-          const existing = imageCache.get(data.assetId)
-          if (existing instanceof VideoFrame) existing.close()
-          imageCache.set(data.assetId, frame)
-        }
+        if (frame) imageCache.set(obj.id, frame)
       }
     }
 
@@ -181,10 +190,10 @@ async function runExport(
   await videoEncoder.flush()
   videoEncoder.close()
 
-  // Clean up video frames in imageCache
+  // Clean up. VideoFrames are owned by their VideoFrameSource — destroy() closes
+  // them (closing here too would double-free). Only ImageBitmaps are ours to close.
   for (const [, val] of imageCache) {
-    if (val instanceof VideoFrame) val.close()
-    else if (val instanceof ImageBitmap) val.close()
+    if (val instanceof ImageBitmap) val.close()
   }
   for (const [, decoder] of videoDecoders) {
     decoder.destroy()

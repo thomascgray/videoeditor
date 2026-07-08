@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
-import type { InteractionMode, TimelineObjectType, TimelineObject, ArrowData, FreehandData, AssetMeta } from '../types'
+import type { InteractionMode, TimelineObjectType, TimelineObject, ArrowData, FreehandData } from '../types'
 import { createTimelineObject } from '../types'
 import { useProject } from '../hooks/useProject'
 import { usePlayback } from '../hooks/usePlayback'
@@ -79,8 +79,8 @@ export default function App() {
     })
 
     // Renormalize points to the new bbox
-    const newData = obj.type === 'arrow'
-      ? { ...obj.data, points: (obj.data as ArrowData).points.map(renorm) }
+    const newData: ArrowData | FreehandData = obj.type === 'arrow'
+      ? { ...(obj.data as ArrowData), points: (obj.data as ArrowData).points.map(renorm) }
       : { strokes: (obj.data as FreehandData).strokes.map((s) => s.map(renorm)) }
 
     dispatch({
@@ -341,6 +341,7 @@ export default function App() {
         <Canvas
           objects={project.objects}
           globalTime={playback.globalTime}
+          isPlaying={playback.isPlaying}
           width={project.width}
           height={project.height}
           selectedObjectId={selectedObjectId}

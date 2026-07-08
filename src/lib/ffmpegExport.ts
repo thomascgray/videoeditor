@@ -1,6 +1,8 @@
 import type { Project, PhotoData, AudioData, VideoData } from '../types'
 import { renderFrame, loadImage } from './renderer'
 import { getAssetUrl, getAssetBlob } from './assetStore'
+import { createVideoFrameSource, type VideoFrameSource } from './videoDecoder'
+import type { ExportWorkerRequest, ExportWorkerResponse, RenderedAudio } from './exportWorkerTypes'
 import { Muxer, ArrayBufferTarget } from 'mp4-muxer'
 
 /**
@@ -13,17 +15,181 @@ function hasWebCodecsSupport(): boolean {
   )
 }
 
+function hasWorkerExportSupport(): boolean {
+  return typeof Worker !== 'undefined' && typeof OffscreenCanvas !== 'undefined'
+}
+
+function abortError(): DOMException {
+  return new DOMException('Export cancelled', 'AbortError')
+}
+
 /**
- * Export video as MP4 (WebCodecs) or WebM (MediaRecorder fallback).
+ * Export video as MP4 (WebCodecs — off the main thread when possible) or WebM
+ * (MediaRecorder fallback). Pass `signal` to cancel an in-progress export.
+ *
+ * Tiering: worker + decoder → main-thread decoder (+ per-clip element fallback)
+ * → MediaRecorder.
  */
 export async function exportVideo(
   project: Project,
   onProgress: (pct: number) => void,
+  signal?: AbortSignal,
 ): Promise<Blob> {
   if (hasWebCodecsSupport()) {
-    return exportWithWebCodecs(project, onProgress)
+    if (hasWorkerExportSupport()) {
+      return exportWithWorker(project, onProgress, signal)
+    }
+    return exportWithWebCodecs(project, onProgress, signal)
   }
-  return exportWithMediaRecorder(project, onProgress)
+  return exportWithMediaRecorder(project, onProgress, signal)
+}
+
+// ---------------------------------------------------------------------------
+// Worker pipeline (WebCodecs off the main thread — cancellable via terminate)
+// ---------------------------------------------------------------------------
+
+async function exportWithWorker(
+  project: Project,
+  onProgress: (pct: number) => void,
+  signal?: AbortSignal,
+): Promise<Blob> {
+  onProgress(0)
+
+  // Audio must be pre-rendered on the main thread (OfflineAudioContext isn't
+  // available in workers) and transferred to the worker as raw channel data.
+  const audio = await prerenderAudioMix(project)
+  if (signal?.aborted) throw abortError()
+
+  const assetBlobs = collectAssetBlobs(project)
+  const worker = new Worker(new URL('./exportWorker.ts', import.meta.url), { type: 'module' })
+
+  return new Promise<Blob>((resolve, reject) => {
+    let settled = false
+
+    const cleanup = () => {
+      signal?.removeEventListener('abort', onAbort)
+      worker.terminate()
+    }
+    const onAbort = () => {
+      if (settled) return
+      settled = true
+      cleanup()
+      reject(abortError())
+    }
+    if (signal?.aborted) { onAbort(); return }
+    signal?.addEventListener('abort', onAbort, { once: true })
+
+    worker.onmessage = async (e: MessageEvent<ExportWorkerResponse>) => {
+      if (settled) return
+      const msg = e.data
+      if (msg.type === 'progress') {
+        onProgress(msg.pct)
+      } else if (msg.type === 'done') {
+        settled = true
+        cleanup()
+        resolve(msg.blob)
+      } else if (msg.type === 'error') {
+        settled = true
+        cleanup()
+        if (msg.recoverable) {
+          // B5 tier 2: worker couldn't decode a clip (no HTMLVideoElement in a
+          // worker). Retry on the main thread, which has the element-seek fallback.
+          console.warn('[export] worker path unsupported, falling back to main thread:', msg.message)
+          try { resolve(await exportWithWebCodecs(project, onProgress, signal)) }
+          catch (err) { reject(err) }
+        } else {
+          reject(new Error(msg.message))
+        }
+      }
+    }
+    worker.onerror = (e) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      reject(new Error(e.message || 'Export worker crashed'))
+    }
+
+    // Transfer the audio channel buffers (zero-copy); exportWithWebCodecs re-renders
+    // its own audio on the fallback path, so detaching them here is safe.
+    const transfer = audio ? audio.channelData.map((c) => c.buffer) : []
+    const req: ExportWorkerRequest = { type: 'start', project, assetBlobs, audio }
+    worker.postMessage(req, transfer)
+  })
+}
+
+/** Gather raw blobs for photo + video assets (audio is sent via RenderedAudio). */
+function collectAssetBlobs(project: Project): Array<[string, Blob]> {
+  const ids = new Set<string>()
+  for (const obj of project.objects) {
+    if (obj.type === 'photo' || obj.type === 'video') {
+      ids.add((obj.data as PhotoData | VideoData).assetId)
+    }
+  }
+  const out: Array<[string, Blob]> = []
+  for (const id of ids) {
+    const blob = getAssetBlob(id)
+    if (blob) out.push([id, blob])
+  }
+  return out
+}
+
+/**
+ * Pre-render the audio mix (OfflineAudioContext) on the main thread and extract
+ * transferable channel data for the worker. Returns null when there's no audio.
+ */
+async function prerenderAudioMix(project: Project): Promise<RenderedAudio | null> {
+  const { objects } = project
+  const totalDuration = objects.reduce(
+    (max, obj) => Math.max(max, obj.startTime + obj.duration),
+    0,
+  )
+  const audioVideoObjects = objects.filter(
+    (o) => o.type === 'audio' || o.type === 'video',
+  )
+  if (audioVideoObjects.length === 0) return null
+
+  const sampleRate = 48000
+  const offlineCtx = new OfflineAudioContext(
+    2,
+    Math.ceil(totalDuration * sampleRate),
+    sampleRate,
+  )
+
+  for (const obj of audioVideoObjects) {
+    const data = obj.data as AudioData | VideoData
+    const blob = getAssetBlob(data.assetId)
+    if (!blob) continue
+    try {
+      const arrayBuffer = await blob.arrayBuffer()
+      const decoded = await offlineCtx.decodeAudioData(arrayBuffer)
+      const source = offlineCtx.createBufferSource()
+      source.buffer = decoded
+      const rate = data.originalDuration / obj.duration
+      source.playbackRate.value = Math.max(0.25, Math.min(4, rate))
+      const gain = offlineCtx.createGain()
+      gain.gain.value = data.volume
+      source.connect(gain)
+      gain.connect(offlineCtx.destination)
+      source.start(obj.startTime)
+    } catch {
+      continue
+    }
+  }
+
+  const audioBuffer = await offlineCtx.startRendering()
+  const numberOfChannels = audioBuffer.numberOfChannels
+  const channelData: Float32Array[] = []
+  for (let ch = 0; ch < numberOfChannels; ch++) {
+    // Copy into a buffer we own so it can be transferred to the worker.
+    channelData.push(new Float32Array(audioBuffer.getChannelData(ch)))
+  }
+
+  return {
+    channelData,
+    sampleRate: audioBuffer.sampleRate,
+    numberOfChannels,
+    length: audioBuffer.length,
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -39,9 +205,18 @@ type StoredChunk = {
   meta?: EncodedVideoChunkMetadata | EncodedAudioChunkMetadata
 }
 
+/**
+ * Per-timeline-object video source. Primary path is a sequential WebCodecs
+ * decoder; the element fallback (B5) engages when the decoder rejects the codec.
+ */
+type VideoSource =
+  | { kind: 'decoder'; source: VideoFrameSource }
+  | { kind: 'element'; el: HTMLVideoElement }
+
 async function exportWithWebCodecs(
   project: Project,
   onProgress: (pct: number) => void,
+  signal?: AbortSignal,
 ): Promise<Blob> {
   const { fps, width, height, objects } = project
 
@@ -54,8 +229,12 @@ async function exportWithWebCodecs(
 
   onProgress(0)
 
-  // --- Load photos + video elements (same as preview/old export) ---
-  const imageCache = new Map<string, HTMLImageElement | HTMLVideoElement>()
+  // --- Load photos (by assetId) + create a video source per video OBJECT ---
+  // Photos live in imageCache keyed by assetId. Decoded video frames are written
+  // into imageCache keyed by OBJECT id (B3: each clip decodes independently, so
+  // two clips sharing one asset never collide on the same cache slot).
+  const imageCache = new Map<string, HTMLImageElement | HTMLVideoElement | VideoFrame>()
+  const videoSources = new Map<string, VideoSource>() // keyed by object id
 
   for (const obj of objects) {
     if (obj.type === 'photo') {
@@ -65,21 +244,32 @@ async function exportWithWebCodecs(
         if (url) imageCache.set(assetId, await loadImage(url))
       }
     } else if (obj.type === 'video') {
-      const assetId = (obj.data as VideoData).assetId
-      if (!imageCache.has(assetId)) {
-        const url = getAssetUrl(assetId)
-        if (url) {
-          const video = document.createElement('video')
-          video.src = url
-          video.muted = true
-          video.preload = 'auto'
-          video.playsInline = true
-          await new Promise<void>((resolve) => {
-            video.onloadeddata = () => resolve()
-            video.onerror = () => resolve()
-          })
-          imageCache.set(assetId, video)
-        }
+      const data = obj.data as VideoData
+      const blob = getAssetBlob(data.assetId)
+      if (!blob) continue
+      try {
+        // Primary path (B1): sequential WebCodecs decode — frame-accurate, no seeks.
+        const source = await createVideoFrameSource(blob)
+        videoSources.set(obj.id, { kind: 'decoder', source })
+      } catch (err) {
+        // B5: the decoder rejected this source codec (e.g. HEVC). Fall back to
+        // HTMLVideoElement seeking for this clip, with the seek race fixed below.
+        console.warn(
+          `[export] VideoDecoder unavailable for "${obj.name}" ` +
+          `(${err instanceof Error ? err.message : String(err)}); falling back to element seeking.`,
+        )
+        const url = getAssetUrl(data.assetId)
+        if (!url) continue
+        const el = document.createElement('video')
+        el.src = url
+        el.muted = true
+        el.preload = 'auto'
+        el.playsInline = true
+        await new Promise<void>((resolve) => {
+          el.onloadeddata = () => resolve()
+          el.onerror = () => resolve()
+        })
+        videoSources.set(obj.id, { kind: 'element', el })
       }
     }
   }
@@ -115,64 +305,83 @@ async function exportWithWebCodecs(
 
   const videoObjects = objects.filter((o) => o.type === 'video')
 
-  for (let f = 0; f < totalFrames; f++) {
-    const globalTime = f / fps
-    const timestampUs = Math.round(globalTime * 1_000_000)
-
-    // Seek video elements to correct source time
-    for (const obj of videoObjects) {
-      const data = obj.data as VideoData
-      const videoEl = imageCache.get(data.assetId)
-      if (!videoEl || !(videoEl instanceof HTMLVideoElement)) continue
-
-      const clipStart = obj.startTime
-      const clipEnd = obj.startTime + obj.duration
-      if (globalTime >= clipStart && globalTime < clipEnd) {
-        const clipProgress = (globalTime - clipStart) / obj.duration
-        const sourceTime = clipProgress * data.originalDuration
-        const timeDiff = Math.abs(videoEl.currentTime - sourceTime)
-
-        if (timeDiff > 0.5) {
-          // Large jump (clip start, or non-sequential) — full seek + wait
-          videoEl.currentTime = sourceTime
-          await new Promise<void>((resolve) => {
-            videoEl.onseeked = () => resolve()
-            setTimeout(resolve, 50)
-          })
-        } else if (timeDiff > 0.01) {
-          // Small sequential advance — set time, brief yield for decode
-          videoEl.currentTime = sourceTime
-          await new Promise<void>((r) => setTimeout(r, 0))
-        }
-        // else: already at right time, no seek needed
-      }
+  const cleanupVideoSources = () => {
+    for (const vs of videoSources.values()) {
+      // B6: decoder frames are source-owned; destroy() closes the retained frame,
+      // buffered frames, and the decoder exactly once. Elements just release.
+      if (vs.kind === 'decoder') vs.source.destroy()
+      else { vs.el.pause(); vs.el.src = '' }
     }
-
-    // Composite all objects onto canvas
-    renderFrame(ctx, objects, globalTime, { width, height }, imageCache)
-
-    // Encode canvas as video frame (no real-time delay!)
-    const frame = new VideoFrame(canvas, {
-      timestamp: timestampUs,
-      duration: Math.round(1_000_000 / fps),
-    })
-
-    const isKeyFrame = f % Math.round(fps * 2) === 0
-    videoEncoder.encode(frame, { keyFrame: isKeyFrame })
-    frame.close()
-
-    // Backpressure
-    while (videoEncoder.encodeQueueSize > 10) {
-      await new Promise<void>((r) => {
-        videoEncoder.addEventListener('dequeue', () => r(), { once: true })
-      })
-    }
-
-    onProgress((f / totalFrames) * 0.85)
+    videoSources.clear()
   }
 
-  await videoEncoder.flush()
-  videoEncoder.close()
+  try {
+    for (let f = 0; f < totalFrames; f++) {
+      if (signal?.aborted) throw abortError()
+      const globalTime = f / fps
+      const timestampUs = Math.round(globalTime * 1_000_000)
+
+      // Source the correct frame for each active clip into imageCache[obj.id].
+      for (const obj of videoObjects) {
+        const data = obj.data as VideoData
+        const vs = videoSources.get(obj.id)
+        if (!vs) continue
+
+        const clipStart = obj.startTime
+        const clipEnd = obj.startTime + obj.duration
+        if (globalTime < clipStart || globalTime >= clipEnd) continue
+
+        const clipProgress = (globalTime - clipStart) / obj.duration
+        const sourceTime = clipProgress * data.originalDuration
+
+        if (vs.kind === 'decoder') {
+          // Sequential decode (B1) — frame-accurate. The returned frame is owned
+          // by the source (valid until the next call); we must NOT close it.
+          const frame = await vs.source.getFrameAtTime(sourceTime)
+          if (frame) imageCache.set(obj.id, frame)
+        } else {
+          // B5 fallback: element seek — ALWAYS await `seeked` (watchdog is only a
+          // stuck-decoder escape, never the normal frame-capture mechanism).
+          vs.el.currentTime = sourceTime
+          await awaitSeeked(vs.el, 500)
+          imageCache.set(obj.id, vs.el)
+        }
+      }
+
+      // Composite all objects onto canvas
+      renderFrame(ctx, objects, globalTime, { width, height }, imageCache)
+
+      // Encode canvas as video frame (no real-time delay!)
+      const frame = new VideoFrame(canvas, {
+        timestamp: timestampUs,
+        duration: Math.round(1_000_000 / fps),
+      })
+
+      const isKeyFrame = f % Math.round(fps * 2) === 0
+      videoEncoder.encode(frame, { keyFrame: isKeyFrame })
+      frame.close()
+
+      // Backpressure
+      while (videoEncoder.encodeQueueSize > 10) {
+        await new Promise<void>((r) => {
+          videoEncoder.addEventListener('dequeue', () => r(), { once: true })
+        })
+      }
+
+      onProgress((f / totalFrames) * 0.85)
+    }
+
+    await videoEncoder.flush()
+    videoEncoder.close()
+  } catch (err) {
+    // B6: release decoders/frames and the encoder on failure before bubbling up.
+    cleanupVideoSources()
+    if (videoEncoder.state !== 'closed') videoEncoder.close()
+    throw err
+  }
+
+  // Free the ~2×file-size demux buffers + decoded frames before audio/mux.
+  cleanupVideoSources()
 
   onProgress(0.88)
 
@@ -324,6 +533,29 @@ async function exportWithWebCodecs(
 }
 
 /**
+ * Await a video element's `seeked` event, with a watchdog escape (logged if hit).
+ * The watchdog guards against a genuinely stuck decoder — it is NOT the normal
+ * path, so the export waits for the real `seeked` on every frame.
+ */
+function awaitSeeked(el: HTMLVideoElement, watchdogMs: number): Promise<void> {
+  return new Promise<void>((resolve) => {
+    let settled = false
+    const finish = () => {
+      if (settled) return
+      settled = true
+      el.removeEventListener('seeked', finish)
+      resolve()
+    }
+    el.addEventListener('seeked', finish)
+    setTimeout(() => {
+      if (settled) return
+      console.warn(`[export] seek watchdog fired (${watchdogMs}ms) — frame may be stale`)
+      finish()
+    }, watchdogMs)
+  })
+}
+
+/**
  * Try H.264 codec strings from most to least capable,
  * returning the first supported encoder config.
  */
@@ -370,6 +602,7 @@ async function findSupportedVideoCodec(
 async function exportWithMediaRecorder(
   project: Project,
   onProgress: (pct: number) => void,
+  signal?: AbortSignal,
 ): Promise<Blob> {
   const { fps, width, height, objects } = project
 
@@ -495,6 +728,11 @@ async function exportWithMediaRecorder(
   const videoObjects = objects.filter((o) => o.type === 'video')
 
   for (let f = 0; f < totalFrames; f++) {
+    if (signal?.aborted) {
+      recorder.stop()
+      if (audioCtx) await audioCtx.close()
+      throw abortError()
+    }
     const globalTime = f / fps
 
     for (const obj of videoObjects) {
