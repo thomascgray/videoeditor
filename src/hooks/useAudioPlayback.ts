@@ -21,9 +21,15 @@ export function useAudioPlayback(
   isPlaying: boolean,
 ) {
   const [isMuted, setIsMuted] = useState(false)
+  // Master preview volume (0–1). Scales each clip's own data.volume; a monitoring level for
+  // playback only (export mixes each clip at its own volume, independent of this).
+  const [volume, setVolumeState] = useState(1)
+  const volumeRef = useRef(1)
   const entriesRef = useRef<Map<string, MediaEntry>>(new Map())
   const globalTimeRef = useRef(globalTime)
   globalTimeRef.current = globalTime
+
+  const clamp01 = (v: number) => Math.max(0, Math.min(1, v))
 
   const toggleMute = useCallback(() => {
     setIsMuted((prev) => {
@@ -33,6 +39,19 @@ export function useAudioPlayback(
       }
       return next
     })
+  }, [])
+
+  // Set the master volume and push it to every live element immediately (no element churn, so
+  // dragging the slider stays smooth). Raising the volume above zero also lifts mute.
+  const setVolume = useCallback((v: number) => {
+    const next = clamp01(v)
+    volumeRef.current = next
+    setVolumeState(next)
+    for (const entry of entriesRef.current.values()) {
+      entry.element.volume = clamp01(entry.volume * next)
+      if (next > 0) entry.element.muted = false
+    }
+    if (next > 0) setIsMuted(false)
   }, [])
 
   // Create/destroy media elements when objects change
@@ -51,7 +70,7 @@ export function useAudioPlayback(
         // Update volume and playbackRate on existing element
         const rate = data.originalDuration / obj.duration
         existing.element.playbackRate = Math.max(0.25, Math.min(4, rate))
-        existing.element.volume = data.volume
+        existing.element.volume = clamp01(data.volume * volumeRef.current)
         existing.originalDuration = data.originalDuration
         existing.volume = data.volume
         continue
@@ -72,7 +91,7 @@ export function useAudioPlayback(
         : document.createElement('audio')
       el.src = url
       el.preload = 'auto'
-      el.volume = data.volume
+      el.volume = clamp01(data.volume * volumeRef.current)
       el.muted = isMuted
 
       const rate = data.originalDuration / obj.duration
@@ -186,5 +205,5 @@ export function useAudioPlayback(
     }
   }, [])
 
-  return { isMuted, toggleMute }
+  return { isMuted, toggleMute, volume, setVolume }
 }

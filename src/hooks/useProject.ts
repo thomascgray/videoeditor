@@ -92,6 +92,10 @@ function applyAction(project: Project, action: ProjectAction): Project {
     case 'SET_NAME':
       return { ...project, name: action.name }
 
+    case 'SET_DIMENSIONS':
+      if (project.width === action.width && project.height === action.height) return project
+      return { ...project, width: action.width, height: action.height }
+
     case 'ADD_OBJECTS':
       return { ...project, objects: [...project.objects, ...action.objects] }
 

@@ -8,6 +8,8 @@ import { loadAssetsFromDB } from '../lib/assetStore'
 import { exportProjectBrep, importProjectBrep } from '../lib/projectStorage'
 import Canvas from './Canvas'
 import AnnotationTools from './AnnotationTools'
+import AspectRatioSelector from './AspectRatioSelector'
+import VolumeControl from './VolumeControl'
 import Timeline from './Timeline'
 import PropertiesPanel from './PropertiesPanel'
 import ImportModal from './ImportModal'
@@ -21,7 +23,7 @@ export default function App() {
   useEffect(() => { loadAssetsFromDB() }, [])
 
   // Audio/video playback sync
-  const { isMuted, toggleMute } = useAudioPlayback(project.objects, playback.globalTime, playback.isPlaying)
+  const { isMuted, toggleMute, volume, setVolume } = useAudioPlayback(project.objects, playback.globalTime, playback.isPlaying)
 
   const [interactionMode, setInteractionMode] = useState<InteractionMode>('move')
   const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null)
@@ -324,6 +326,8 @@ export default function App() {
               e.target.value = ''
             }}
           />
+          <span className="w-px h-6 bg-gray-700" />
+          <AspectRatioSelector width={project.width} height={project.height} dispatch={dispatch} />
         </div>
         <div className="flex items-center gap-2">
           <AnnotationTools
@@ -358,15 +362,12 @@ export default function App() {
           >
             {playback.isPlaying ? 'Pause' : 'Play'}
           </button>
-          <button
-            onClick={toggleMute}
-            className={`px-2 py-1.5 text-sm rounded transition-colors cursor-pointer ${
-              isMuted ? 'bg-red-900/50 text-red-300 hover:bg-red-800/50' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
-            }`}
-            title={isMuted ? 'Unmute' : 'Mute'}
-          >
-            {isMuted ? 'Muted' : 'Sound'}
-          </button>
+          <VolumeControl
+            volume={volume}
+            isMuted={isMuted}
+            onVolume={setVolume}
+            onToggleMute={toggleMute}
+          />
           <span className="text-xs text-gray-400 tabular-nums min-w-16 text-right">
             {playback.globalTime.toFixed(1)}s / {playback.totalDuration.toFixed(1)}s
           </span>
@@ -416,6 +417,9 @@ export default function App() {
         onSelectObject={handleSelectObject}
         onSeek={playback.seek}
         dispatch={dispatch}
+        zooms={project.zooms}
+        selectedZoomId={selectedZoomId}
+        onSelectZoom={handleSelectZoom}
       />
 
       {/* Modals */}

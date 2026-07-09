@@ -647,14 +647,14 @@ function TypeOnBar({
   return (
     <div>
       <div className="flex items-center justify-between mb-1">
-        <label className="text-gray-400 text-xs">Type-on</label>
+        <label className="text-gray-400 text-xs">Reveal</label>
         <span className="text-[10px] text-gray-500 tabular-nums">
           {animateIn <= 0 ? 'instant' : `${animateIn.toFixed(1)}s of ${duration.toFixed(1)}s`}
         </span>
       </div>
       <div
         className="relative h-4 w-full rounded bg-gray-700 cursor-ew-resize select-none touch-none"
-        title="Drag to set how long the object takes to type / draw on — fully left = instant"
+        title="Drag to set how long the object takes to reveal (type / draw on / grow in) — fully left = instant"
         onPointerDown={(e) => {
           e.preventDefault()
           dragging.current = true

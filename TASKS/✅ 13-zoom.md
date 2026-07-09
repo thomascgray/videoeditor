@@ -1,6 +1,6 @@
 # 13-zoom (Camera Zoom)
 
-**Status**: In Progress
+**Status**: Complete
 
 ## Overview
 
@@ -60,9 +60,10 @@ None currently.
 [X] Click an active resolved framing rect (nothing selected) to select its governing zoom
 [ ] (Optional) draw-rectangle-to-create (aspect-fit → `{x,y,scale}`) — deferred, not required
 
-**Phase 5 — Timeline Camera track** (remaining)
-[ ] Pinned Camera track in `Timeline.tsx` from `project.zooms`; envelope bars, sub-region stripes
-[ ] Drag-to-retime + resize (transient→commit) + click-to-select
+**Phase 5 — Timeline Camera track** ✅
+[X] Pinned Camera track in `Timeline.tsx` from `project.zooms` (own row under the ruler + ⛶ gutter label); amber envelope bars with transition-in/out ramp shading
+[X] Drag-to-retime (startTime) + resize (left/right adjust `hold`, opposite edge anchored) + click-to-select — all transient→commit (one undo per gesture)
+[X] Empty camera-track / lane click deselects zoom; object↔zoom mutual exclusion preserved
 
 **Phase 6 — Export wiring** ✅
 [X] Pass `resolveCamera(project.zooms, t)` per frame in `ffmpegExport.ts` (WebCodecs + MediaRecorder) + `exportWorker.ts`
@@ -86,4 +87,9 @@ None currently.
 - src/lib/camera.ts: added zoomEnvelope + governingZoomAt helpers.
 - src/lib/ffmpegExport.ts (both WebCodecs + MediaRecorder paths) + src/lib/exportWorker.ts: pass resolveCamera(project.zooms, t) per frame.
 - Persistence unchanged (whole-project JSON already round-trips zooms).
-- Remaining: Phase 5 (Timeline Camera track). Open Qs resolved with spec defaults (scale 2 / 0.6 / 2 / 0.6 / easeInOutCubic; "Animations" label; separate selectedZoomId).
+- Open Qs resolved with spec defaults (scale 2 / 0.6 / 2 / 0.6 / easeInOutCubic; "Animations" label; separate selectedZoomId).
+
+[2026-07-09] Phase 5 complete — Timeline Camera track. All phases done (pending user browser validation).
+- src/components/Timeline.tsx: pinned Camera track (its own CAMERA_TRACK_HEIGHT row under the ruler in both the gutter — ⛶ label — and the scroll area). Renders project.zooms as amber envelope bars; transition-in/out shown as dark gradient ramps at each end, hold = solid middle; label shows scale ×. Zoom DragState variants (zoom-move / zoom-resize-left / zoom-resize-right) → UPDATE_ZOOM_TRANSIENT + COMMIT_TRANSIENT (one undo/gesture). Resize adjusts `hold` anchored at the opposite edge; left-resize also moves startTime with a clamp so hold never goes negative. Click a bar → onSelectZoom; empty track/lane click → deselect + seek.
+- src/components/App.tsx: threaded zooms / selectedZoomId / onSelectZoom into Timeline.
+- src/lib/camera.ts zoomEnvelope reused for bar width. tsc + full vite build green; no new lint errors (4 pre-existing React-Compiler memoization errors unchanged).

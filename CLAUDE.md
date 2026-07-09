@@ -9,7 +9,7 @@ A browser-based video editor: **React 19 + TypeScript + Canvas 2D + WebCodecs**,
 - **Verify with `npx tsc -b`** (the build is `tsc -b && vite build`). Keep it green — there is no other typecheck gate.
 - **Do NOT run the dev server or browser automation.** The user always has `npm run dev` running and tests changes in the browser themselves. After a change, run static checks and hand the user a short "click X, look for Y" checklist. (See `.claude/skills/verify/SKILL.md`.)
 - `src/config.ts` → `persistProject` (default **false**): when false the app boots to an empty default project and does **not** load/save localStorage. Flip to true to persist across refreshes.
-- Specs live in `SPECS/`, implementation logs in `TASKS/`. Spec 12 (animation) is **done**; 09 (video perf), 13 (camera), 14 (video trim), 15 (audio) are planned; 10 (build fixes) done; 11 (audio pitch) planned.
+- Specs live in `SPECS/`, implementation logs in `TASKS/`. Spec 12 (animation) and 13 (camera zoom) are **done**; 09 (video perf), 14 (video trim), 15 (audio) are planned; 10 (build fixes) done; 11 (audio pitch) planned.
 
 ## The data model (`src/types.ts`)
 
@@ -37,8 +37,9 @@ type TimelineObject = {
 - **Coordinates are normalized 0–1**, multiplied by the canvas `width`/`height` (project dims, default 1920×1080) at draw time. This is why a camera/zoom (spec 13) is just one `ctx` transform, and why hit-testing on a non-square canvas converts to pixel space (`Canvas.tsx`).
 - `data` variants: `PhotoData{assetId}`, `ArrowData{points[],headSize,curvature,progressiveHead}`, `TextData{content,background?,padding?}`, `ShapeData` (empty — rect/circle), `FreehandData{strokes[][]}`, `AudioData{assetId,volume,originalDuration,waveform?}`, `VideoData{assetId,volume,originalDuration}`.
 - **No trim yet**: for audio/video, shortening `duration` **speeds the clip up** (`rate = originalDuration/duration`, clamped 0.25–4). `sourceIn`/`sourceOut` trim is planned in spec 14. This is a real model gap, not a bug.
-- `Project = {id,name,fps,width,height,objects[],assets[]}`. `AssetMeta = {id,type,filename,mimeType,size,duration?}`.
-- Factories: `createDefaultProject()`, `createTimelineObject(type, data, options)`.
+- `Project = {id,name,fps,width,height,objects[],assets[], zooms?}`. `AssetMeta = {id,type,filename,mimeType,size,duration?}`. `zooms?: CameraZoom[]` is the camera track (spec 13) — optional/additive, persists via the same whole-project JSON.
+- **`CameraZoom` is NOT a `TimelineObject`** — no `lane`/`data`/`keyframes`. It's `{id, x, y, scale, startTime, transitionIn, hold, transitionOut, easing}` (see Camera below). Selected via a **separate `selectedZoomId`** in `App.tsx`, mutually exclusive with `selectedObjectId`.
+- Factories: `createDefaultProject()`, `createTimelineObject(type, data, options)`, `createCameraZoom(options?)` (defaults: `scale 2`, `transitionIn 0.6`, `hold 2`, `transitionOut 0.6`, `easeInOutCubic`).
 
 ### State & undo (`src/hooks/useProject.ts`)
 
@@ -46,19 +47,20 @@ A reducer over `{past[], present, future[], transientSnapshot}` (undo stack capp
 - `UPDATE_OBJECT` — shallow-merges `updates` into the object (`{...o, ...updates}`), so nested `data`/`style`/`keyframes` must be passed **whole**. Every dispatch = one undo entry.
 - `UPDATE_OBJECT_TRANSIENT` → `COMMIT_TRANSIENT` — the pattern for a continuous gesture (drag): transient updates don't grow history; commit collapses the whole gesture into **one** undo entry. Used by canvas drag/resize and timeline bar drags.
 - `ADD_OBJECTS`, `REMOVE_OBJECT`, `DUPLICATE_OBJECT` (deep-clones `data`+`keyframes` so copies are independent), `ADD_ASSETS`, `REMOVE_LANE`, `SET_PROJECT`, `SET_NAME`, `UNDO`/`REDO`.
+- Camera zooms (spec 13): `ADD_ZOOM`, `UPDATE_ZOOM`, `UPDATE_ZOOM_TRANSIENT` (→ reuse `COMMIT_TRANSIENT`), `REMOVE_ZOOM` — mirror the object CRUD + transient/commit pattern (one undo per drag gesture).
 
 ## Rendering pipeline
 
 **`renderFrame(ctx, objects, globalTime, {width,height}, imageCache, editorOptions?)` in `src/lib/renderer.ts` is the single, pure compositor shared by preview and export.** Change it once, both update.
 
-1. Fills black background, filters objects to those visible at `globalTime`, sorts by `lane`.
+1. Fills black background (un-zoomed, so the letterbox stays black), then wraps the object loop in `ctx.save()` → optional **camera transform** (`editorOptions.camera: CameraState`, spec 13) → `ctx.restore()`. Absent/identity camera = no-op = pixel-identical to pre-camera output. Filters objects visible at `globalTime`, sorts by `lane`.
 2. Per object: `resolveRenderPose(obj, globalTime)` (see Animation) → computes `progress` from `animateIn` → `drawObject`.
 3. `drawObject` applies rotation about the bbox center, then dispatches by type to the `draw*` fns in `src/lib/annotations.ts`. Photos/videos use `drawImageCover` (object-fit: cover, duck-typed to work in workers with `VideoFrame`/`ImageBitmap`/`HTMLVideoElement`).
 4. `imageCache: Map<string, HTMLImageElement|HTMLVideoElement|ImageBitmap|VideoFrame>` — photos keyed by `assetId`, videos by **object id** (preview blits the shared `<video>` element; export decodes frames).
 
 **Preview** (`src/hooks/useCanvasRenderer.ts`): pulls each video object's shared element from `mediaRegistry`, then calls `renderFrame` on a plain 2D context. Renders via a rAF loop while playing, or on state change while paused. **No DPR handling** — the canvas backing store is the raw project dims; CSS letterboxes it.
 
-**Two canvases** (`src/components/Canvas.tsx`): a *render* canvas (goes through `renderFrame`) and a stacked *overlay* canvas (selection box, resize/rotate handles, arrow rubber-band) drawn in pixel space by `drawOverlay`. The overlay owns all mouse events. **The overlay is NOT part of `renderFrame`** — anything that transforms the render (camera, spec 13) must be mirrored in the overlay.
+**Two canvases** (`src/components/Canvas.tsx`): a *render* canvas (goes through `renderFrame`) and a stacked *overlay* canvas (selection box, resize/rotate handles, arrow rubber-band, **camera framing rect + grey scrim**) drawn in pixel space by `drawOverlay`. The overlay owns all mouse events. **The overlay is NOT part of `renderFrame`.** The camera (spec 13) sidesteps the "mirror the transform in the overlay" problem entirely: in **Frame view** the render canvas is *un-transformed* and the overlay draws the zoom as a framing rectangle, so object hit-testing never needs the inverse transform; **Live view** applies the real transform to the render canvas but disables editing. See Camera below.
 
 ## Animation system (spec 12 — freshest, likely bug-fix target)
 
@@ -93,6 +95,16 @@ Menu-driven entrance/exit: `Transition = {kind: 'none'|'fade'|'slide'|'pop', dur
 ### Canvas interaction with animation
 `Canvas.tsx` derives `selectedObject = resolvePose(raw, globalTime)` — the **keyframe-resolved** pose (NOT enter/exit, so the object stays grabbable at home during an entrance). So the overlay/hit-test/drag all follow keyframed motion, and both drag dispatch paths (the canvas handler and the window-level one for dragging outside the canvas) go through `editPose`, which upserts per the rule above — on a keyframe it reshapes that keyframe (box follows text), at the start it moves the home pose, and in between it drops a new keyframe. Because the created keyframe sits at the playhead, the box turns that keyframe's color mid-drag.
 
+## Camera / zooms (spec 13 — screen-recorder-style push-ins)
+
+A project-level list of discrete **`CameraZoom`s** (`Project.zooms?`) compiles into a single global `ctx.translate/scale` on the render — a "camera". Because object coords are normalized 0–1, one transform composes over every object for free, and it lives inside the shared `renderFrame`, so **preview (Live view) and export are identical by construction**. A thin layer on the spec-12 easing engine (reuses `ease`/`lerp`), **not** the whole-pose `Keyframe[]` machinery — the camera has its own simpler segment model.
+
+- **Resolver (`src/lib/camera.ts`)**: `resolveCamera(zooms, globalTime): CameraState` (`{x,y,scale≥1}`; `IDENTITY_CAMERA = {0.5,0.5,1}` = full frame). **Governing-window model**: zooms are sorted by `startTime`; each governs `[startTime_i, startTime_{i+1})` and plays ease-in → hold → ease-out, but the ease-in starts from `fromPose_i` = the resolved pose at its start. So **A→B chaining is timing-driven**: if B starts while A is still active the camera moves straight A→B (no pull-back); a gap → A eases back to full frame first. Single left-to-right pass. Also exports `cameraFrameRect`/`cameraFromFrameRect` (the normalized rect a pose frames: `w=h=1/scale`), `isIdentityCamera`, `zoomEnvelope`, `governingZoomAt`. **`scale ≥ 1` only** (no zoom-out in v1).
+- **Frame view vs Live view** (`cameraView: 'frame'|'live'` in `App.tsx` — pure view state, NOT persisted / not undo): **Frame** (default authoring) renders un-zoomed + the overlay draws the framing rectangle & grey scrim; **Live** passes `resolveCamera(...)` into `renderFrame` for the real push-in and **disables object editing**. Toggle = canvas corner button or **`V`**. Export always renders Live.
+- **Authoring**: `+ Zoom` CTA (new **Animations** toolbar cluster in `AnnotationTools.tsx`) creates a default zoom at the playhead, selects it, switches to Frame view. Edit numerically in `PropertiesPanel`'s **`ZoomEditor`** (focus x/y, scale, timing, easing, delete), or on-canvas: drag the framing rect body (moves focal point, clamped in-bounds) / a corner handle (scales about the fixed focal point) via `UPDATE_ZOOM_TRANSIENT`→`COMMIT_TRANSIENT`. In Frame view a **selected** zoom shows its *editable target* rect (with handles); when nothing is selected the *resolved* rect is shown read-only and **animates** as the playhead moves.
+- **Timeline Camera track** (`Timeline.tsx`): a **pinned** track (its own row under the ruler, ⛶ gutter label) rendering `project.zooms` as amber envelope bars (ease-in/out shown as end ramps, hold = solid middle). Drag body = retime `startTime`; drag edges = adjust `hold` anchored at the opposite edge; click = select. Adjacent bars make A→B chaining visible. All transient→commit.
+- **Selection invariant**: `selectedObjectId` and `selectedZoomId` are mutually exclusive — selecting one clears the other (enforced in `App.tsx`). `PropertiesPanel` renders the `ZoomEditor` instead of the object editor when a zoom is selected.
+
 ## Playback, audio, media (`src/hooks/`)
 
 - **`usePlayback`** — owns `globalTime` (state, advanced by rAF while playing), `isPlaying`, `totalDuration`, `play/pause/togglePlayback/seek`.
@@ -113,6 +125,7 @@ Tiered: **WebCodecs `VideoEncoder` + `mp4-muxer`** (primary, main thread) → **
 | Playback | `src/hooks/usePlayback.ts`, `useAudioPlayback.ts`, `useCanvasRenderer.ts` |
 | Compositor | `src/lib/renderer.ts` (shared preview+export) |
 | Animation core | `src/lib/keyframes.ts` (poses/keyframes/transitions), `src/lib/easing.ts` |
+| Camera / zooms | `src/lib/camera.ts` (`resolveCamera` + rect helpers); zoom UI in `Canvas.tsx` (framing rect/scrim + Live toggle), `Timeline.tsx` (Camera track), `PropertiesPanel.tsx` (`ZoomEditor`), `AnnotationTools.tsx` (`+ Zoom`) |
 | Drawing | `src/lib/annotations.ts` (arrow/text/shape/freehand + bezier math) |
 | Media/assets | `src/lib/assetStore.ts`, `mediaRegistry.ts` |
 | Persistence | `src/lib/projectStorage.ts` (localStorage + `.brep` zip export/import) |
@@ -125,5 +138,6 @@ Tiered: **WebCodecs `VideoEncoder` + `mp4-muxer`** (primary, main thread) → **
 - **No DPR handling**; canvas backing store = raw project dims.
 - **Trim = speed** for audio/video (see data model). Spec 14 fixes it.
 - **Export runs on the main thread** → UI freezes during export; not cancellable. Spec 09 B4/B8.
-- **Overlay must mirror render transforms** — the selection overlay is a separate canvas; a camera (spec 13) needs the inverse transform for hit-testing while zoomed.
+- **Overlay must mirror render transforms** — the selection overlay is a separate canvas. Spec 13's camera **avoids** needing an inverse transform in v1 by only editing objects in the un-zoomed **Frame view** (Live view disables editing). If object editing while zoomed is ever added, the overlay/hit-testing will need the inverse camera transform.
+- **Camera export is wired but main-thread** — all three export paths (`ffmpegExport.ts` WebCodecs + MediaRecorder, plus `exportWorker.ts`) pass `resolveCamera(project.zooms, t)` per frame, so exports show the same push-ins as Live view.
 - **Editing a keyframed object auto-creates keyframes** (via `editPose`, off a keyframe and past the start) — this is intentional, *not* the old button-only model. And because keyframes are **whole-pose**, an auto-created one also freezes size/rotation/opacity at their interpolated values at that instant, not just the property you touched. Un-keyframed objects are unaffected (they only ever edit their base pose).

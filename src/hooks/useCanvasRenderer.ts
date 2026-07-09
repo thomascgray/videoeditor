@@ -19,6 +19,8 @@ export function useCanvasRenderer(
   objects: TimelineObject[],
   globalTime: number,
   isPlaying: boolean,
+  width: number,
+  height: number,
   editorOptions?: EditorOptions,
 ) {
   // Photos cached by assetId; video elements are merged in per-render (by object id).
@@ -47,6 +49,19 @@ export function useCanvasRenderer(
       height: canvas.height,
     }, cache, editorOptions)
   }, [canvasRef, objects, editorOptions])
+
+  // Own the render canvas's backing-store size. Setting canvas.width/height clears it, so we
+  // resize (only when it actually changed) and immediately redraw in the same effect — otherwise
+  // switching aspect ratio while paused would leave the canvas blank until the next scrub/play.
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    if (canvas.width !== width || canvas.height !== height) {
+      canvas.width = width
+      canvas.height = height
+    }
+    doRender()
+  }, [width, height, doRender, canvasRef])
 
   // Load images for photo objects from the asset store.
   useEffect(() => {

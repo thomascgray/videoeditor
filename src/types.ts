@@ -174,6 +174,7 @@ export type InteractionMode = 'move' | 'draw'
 export type ProjectAction =
   | { type: 'SET_PROJECT'; project: Project }
   | { type: 'SET_NAME'; name: string }
+  | { type: 'SET_DIMENSIONS'; width: number; height: number }
   | { type: 'ADD_OBJECTS'; objects: TimelineObject[] }
   | { type: 'REMOVE_OBJECT'; objectId: string }
   | { type: 'UPDATE_OBJECT'; objectId: string; updates: Partial<Omit<TimelineObject, 'id' | 'type'>> }

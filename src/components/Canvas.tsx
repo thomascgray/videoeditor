@@ -463,18 +463,16 @@ export default function Canvas({
     activeDrawingObjectId,
     camera: liveCamera,
   }), [isLive, activeDrawingObjectId, liveCamera])
-  useCanvasRenderer(renderCanvasRef, objects, globalTime, isPlaying, editorOpts)
+  useCanvasRenderer(renderCanvasRef, objects, globalTime, isPlaying, width, height, editorOpts)
 
   // Keep dragStateRef in sync for use in event handlers
   dragStateRef.current = dragState
 
-  // Set canvas dimensions
+  // Size the overlay canvas's backing store. The render canvas is sized by useCanvasRenderer
+  // (which also redraws on resize), so we only own the overlay here.
   useEffect(() => {
-    const rc = renderCanvasRef.current
     const oc = overlayCanvasRef.current
-    if (!rc || !oc) return
-    rc.width = width
-    rc.height = height
+    if (!oc) return
     oc.width = width
     oc.height = height
   }, [width, height])
