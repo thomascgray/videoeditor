@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef } from 'react'
 import type { Project } from '../types'
 import { exportVideo } from '../lib/ffmpegExport'
+import type { ExportSettings } from '../lib/exportSettings'
 
 export function useFFmpegExport() {
   const [isExporting, setIsExporting] = useState(false)
@@ -8,7 +9,7 @@ export function useFFmpegExport() {
   const [error, setError] = useState<string | null>(null)
   const abortRef = useRef<AbortController | null>(null)
 
-  const startExport = useCallback(async (project: Project) => {
+  const startExport = useCallback(async (project: Project, settings: ExportSettings) => {
     setIsExporting(true)
     setProgress(0)
     setError(null)
@@ -17,7 +18,7 @@ export function useFFmpegExport() {
     abortRef.current = controller
 
     try {
-      const blob = await exportVideo(project, (pct) => {
+      const blob = await exportVideo(project, settings, (pct) => {
         setProgress(pct)
       }, controller.signal)
 

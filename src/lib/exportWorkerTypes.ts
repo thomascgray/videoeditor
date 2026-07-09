@@ -8,12 +8,20 @@ export type RenderedAudio = {
   length: number // total samples per channel
 }
 
+/** Resolved output dimensions + video bitrate for the encode (issue #6). */
+export type EncodeConfig = {
+  width: number
+  height: number
+  videoBitrate: number
+}
+
 /** Main thread → Worker */
 export type ExportWorkerRequest = {
   type: 'start'
   project: Project
   assetBlobs: Array<[string, Blob]>
   audio: RenderedAudio | null
+  encode: EncodeConfig
 }
 
 /** Worker → Main thread */

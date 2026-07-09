@@ -1,8 +1,72 @@
 import { useReducer, useCallback, useEffect, useRef } from 'react'
-import type { Project, ProjectAction } from '../types'
+import type { Project, ProjectAction, TimelineObject, AudioData, VideoData, Keyframe } from '../types'
 import { createDefaultProject } from '../types'
+import { poseAt, KF_EPS } from '../lib/keyframes'
+import { srcIn, srcOut, sourceSpan } from '../lib/mediaTiming'
 import { saveProject, loadProject } from '../lib/projectStorage'
 import { config } from '../config'
+
+/**
+ * Split an audio/video object at the playhead into two independent halves (spec 14 R10).
+ * The left half REUSES the original id (an in-place shorten, so the current selection stays
+ * on it — R10.6), the right half gets a fresh id. Both preserve rate = span/duration, so a
+ * cut at 1× stays 1× and a 2× clip stays 2× on both sides (R10.1). data + keyframes are
+ * deep-cloned per half (mirrors DUPLICATE_OBJECT) so the halves are fully independent.
+ */
+function splitObject(obj: TimelineObject, globalTime: number): [TimelineObject, TimelineObject] {
+  const splitOffset = globalTime - obj.startTime
+  const data = obj.data as AudioData | VideoData
+  const inPt = srcIn(data)
+  const outPt = srcOut(data)
+  const span = sourceSpan(data)
+  // Split point in SOURCE coords (R10.1). Uses R2's mapping directly.
+  const sourceSplit = inPt + (splitOffset / obj.duration) * span
+
+  // Keyframe bucketing (R10.3). Keyframes are clip-relative, so the right half's shift by
+  // -splitOffset re-anchors them. before/at/after partition the timeline at the cut.
+  const kfs = obj.keyframes ?? []
+  const atKfs = kfs.filter((k) => Math.abs(k.time - splitOffset) <= KF_EPS)
+  const leftKfs: Keyframe[] = kfs
+    .filter((k) => k.time < splitOffset - KF_EPS)
+    .map((k) => structuredClone(k))
+  const rightKfs: Keyframe[] = kfs
+    .filter((k) => k.time > splitOffset + KF_EPS)
+    .map((k) => ({ ...structuredClone(k), time: k.time - splitOffset }))
+
+  // A keyframe exactly on the cut is duplicated onto both halves (left end / right start).
+  for (const k of atKfs) {
+    leftKfs.push({ ...structuredClone(k), time: splitOffset })
+    rightKfs.unshift({ ...structuredClone(k), time: 0 })
+  }
+
+  // Continuity across the cut (R10.3): when the object is keyframed and there isn't already a
+  // keyframe on the cut, pin the interpolated pose at the split onto the end of the left half and
+  // the start of the right half — otherwise the right half would restart its tween from the base
+  // (home) pose and pop. Pinning both boundaries guarantees the pose matches on each side.
+  if (kfs.length > 0 && atKfs.length === 0) {
+    const atPose = poseAt(obj, splitOffset)
+    const boundaryEasing = kfs.find((k) => k.time > splitOffset + KF_EPS)?.easing ?? 'linear'
+    leftKfs.push({ time: splitOffset, pose: { ...atPose }, easing: boundaryEasing })
+    rightKfs.unshift({ time: 0, pose: { ...atPose }, easing: boundaryEasing })
+  }
+
+  const left: TimelineObject = {
+    ...obj,
+    duration: splitOffset,
+    data: { ...structuredClone(data), sourceIn: inPt, sourceOut: sourceSplit },
+    keyframes: leftKfs.length ? leftKfs : undefined,
+  }
+  const right: TimelineObject = {
+    ...obj,
+    id: crypto.randomUUID(),
+    name: `${obj.name} (2)`,
+    startTime: obj.startTime + splitOffset,
+    duration: obj.duration - splitOffset,
+    data: { ...structuredClone(data), sourceIn: sourceSplit, sourceOut: outPt },
+    keyframes: rightKfs.length ? rightKfs : undefined,
+  }
+  return [left, right]
+}
 
 type UndoableState = {
   past: Project[]
@@ -143,6 +207,20 @@ function applyAction(project: Project, action: ProjectAction): Project {
       }
       const objects = [...project.objects]
       objects.splice(idx + 1, 0, dupe)
+      return { ...project, objects }
+    }
+
+    case 'SPLIT_OBJECT': {
+      const idx = project.objects.findIndex((o) => o.id === action.objectId)
+      if (idx === -1) return project
+      const obj = project.objects[idx]
+      if (obj.type !== 'audio' && obj.type !== 'video') return project
+      const splitOffset = action.globalTime - obj.startTime
+      // No-op unless the playhead is strictly inside; a small margin avoids degenerate sub-clips.
+      if (splitOffset <= 0.05 || splitOffset >= obj.duration - 0.05) return project
+      const [left, right] = splitObject(obj, action.globalTime)
+      const objects = [...project.objects]
+      objects.splice(idx, 1, left, right)  // replace original with the two halves, preserving order
       return { ...project, objects }
     }
 

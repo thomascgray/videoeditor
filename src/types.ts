@@ -26,6 +26,15 @@ export type TimelineObject = {
   // Visual style
   style: ObjectStyle
 
+  // Non-destructive visibility (spec 14 R11). When true, the object stays in the
+  // project/timeline but is skipped in every render/audio/export path. Default false.
+  hidden?: boolean
+
+  // When true, the object renders at its normalized position over the FULL frame and is NOT
+  // affected by the camera/zoom transform — a "pinned" overlay that stays put at any zoom.
+  // Handled per-object inside renderFrame; default false.
+  ignoreCamera?: boolean
+
   // Type-specific payload
   data: PhotoData | ArrowData | TextData | ShapeData | FreehandData | AudioData | VideoData
 }
@@ -37,6 +46,7 @@ export type ObjectStyle = {
   fontSize?: number
   fontFamily?: string
   fontWeight?: string
+  fontStyle?: string   // 'normal' | 'italic'
 }
 
 // === Animation / Keyframes ===
@@ -85,10 +95,15 @@ export type ArrowData = {
   progressiveHead: boolean  // when true, arrowhead follows the animated tip; when false, only shows at end
 }
 
+export type TextAlign = 'left' | 'center' | 'right' | 'justify'
+
 export type TextData = {
   content: string
   background?: string
   padding?: number
+  align?: TextAlign     // horizontal alignment of wrapped lines; default 'center'
+  autoSize?: boolean    // when true (default), font size is auto-fit to fill the box; when
+                        // false, style.fontSize is used verbatim (lines still wrap to width)
 }
 
 export type ShapeData = Record<string, never>
@@ -102,12 +117,16 @@ export type AudioData = {
   volume: number            // 0–1
   originalDuration: number  // seconds — the source file's actual duration
   waveform?: number[]       // ~200 peak values for visualization
+  sourceIn?: number         // trim: source seconds where playback begins; default 0 (spec 14)
+  sourceOut?: number        // trim: source seconds where playback ends; default originalDuration
 }
 
 export type VideoData = {
   assetId: string           // reference to asset in asset store
   volume: number            // 0–1
   originalDuration: number  // seconds — the source file's actual duration
+  sourceIn?: number         // trim: source seconds where playback begins; default 0 (spec 14)
+  sourceOut?: number        // trim: source seconds where playback ends; default originalDuration
 }
 
 // === Camera (spec 13) ===
@@ -131,6 +150,7 @@ export type CameraZoom = {
   hold: number           // seconds held fully zoomed
   transitionOut: number  // seconds to ease back to full frame IF no next zoom takes over first
   easing: EasingKind     // spec-12 curve applied to both in and out ramps
+  hidden?: boolean       // spec 14 R11: filtered out of resolveCamera when true; default false
 }
 // Chaining (A->B) is expressed by TIMING: if zoom B's startTime lands while zoom A is still
 // active (holding, or mid ease-out), B's transitionIn eases from A's current pose straight to B's
@@ -181,6 +201,7 @@ export type ProjectAction =
   | { type: 'UPDATE_OBJECT_TRANSIENT'; objectId: string; updates: Partial<Omit<TimelineObject, 'id' | 'type'>> }
   | { type: 'COMMIT_TRANSIENT' }
   | { type: 'DUPLICATE_OBJECT'; objectId: string }
+  | { type: 'SPLIT_OBJECT'; objectId: string; globalTime: number }  // spec 14 R10: atomic slice-at-playhead (one undo entry)
   | { type: 'REMOVE_LANE'; lane: number }
   | { type: 'ADD_ASSETS'; assets: AssetMeta[] }
   | { type: 'ADD_ZOOM'; zoom: CameraZoom }
@@ -261,6 +282,7 @@ export function createTimelineObject(
       fontSize: 32,
       fontFamily: 'sans-serif',
       fontWeight: 'bold',
+      fontStyle: 'normal',
       ...options?.style,
     },
     data,

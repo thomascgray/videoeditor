@@ -1,6 +1,6 @@
 import { useRef } from 'react'
 import type {
-  TimelineObject, ProjectAction, ArrowData, AudioData, VideoData, TextData,
+  TimelineObject, ProjectAction, ArrowData, AudioData, VideoData, TextData, TextAlign,
   AnimatableProperty, EasingKind, Transition, TransitionKind, SlideDirection, Keyframe,
   CameraZoom,
 } from '../types'
@@ -9,6 +9,8 @@ import {
   keyframeColor, defaultTransitionEasing,
 } from '../lib/keyframes'
 import { clamp01 } from '../lib/easing'
+import { srcIn, srcOut, sourceSpan, RATE_MIN, RATE_MAX } from '../lib/mediaTiming'
+import { rememberObjectStyle, rememberObjectData } from '../lib/objectDefaults'
 
 type PropertiesPanelProps = {
   object: TimelineObject | null
@@ -56,7 +58,17 @@ export default function PropertiesPanel({ object: obj, zoom, dispatch, globalTim
   }
 
   const updateStyle = (styleUpdates: Partial<TimelineObject['style']>) => {
-    update({ style: { ...obj.style, ...styleUpdates } })
+    const nextStyle = { ...obj.style, ...styleUpdates }
+    update({ style: nextStyle })
+    // Remember these settings as the default for the next object of this type (feature: last-used).
+    rememberObjectStyle(obj.type, nextStyle)
+  }
+
+  // Update type-specific data AND remember the given fields as new-object defaults. Only pass
+  // fields that are safe to carry forward (never content/points/strokes/assetId).
+  const updateData = (dataUpdates: Partial<TextData & ArrowData>, remember: Record<string, unknown>) => {
+    update({ data: { ...obj.data, ...dataUpdates } as TimelineObject['data'] })
+    rememberObjectData(obj.type, remember)
   }
 
   // --- Pose / keyframe helpers ---
@@ -142,13 +154,46 @@ export default function PropertiesPanel({ object: obj, zoom, dispatch, globalTim
         <Field label="Lane">
           <NumberInput value={obj.lane} min={0} step={1} onChange={(v) => update({ lane: v })} />
         </Field>
-        {(obj.type === 'audio' || obj.type === 'video') && (
-          <Field label="Speed">
-            <span className="text-xs text-gray-400 tabular-nums">
-              {((obj.data as AudioData | VideoData).originalDuration / obj.duration).toFixed(2)}x
-            </span>
-          </Field>
-        )}
+        {(obj.type === 'audio' || obj.type === 'video') && (() => {
+          // Speed and trim are orthogonal (spec 14 R3): Speed writes `duration` (span fixed → rate
+          // changes); In/Out write the source span AND recompute `duration` to keep rate constant.
+          const md = obj.data as AudioData | VideoData
+          const inVal = srcIn(md)
+          const outVal = srcOut(md)
+          const span = Math.max(0.01, sourceSpan(md))
+          const rate = span / obj.duration
+          const r2 = (n: number) => Math.round(n * 100) / 100
+          const setSpeed = (s: number) => {
+            const clamped = Math.max(RATE_MIN, Math.min(RATE_MAX, s))
+            update({ duration: r2(span / clamped) })
+          }
+          const setIn = (v: number) => {
+            const nin = Math.max(0, Math.min(v, outVal - 0.05))
+            update({ duration: r2((outVal - nin) / rate), data: { ...md, sourceIn: r2(nin), sourceOut: r2(outVal) } })
+          }
+          const setOut = (v: number) => {
+            const nout = Math.max(inVal + 0.05, Math.min(v, md.originalDuration))
+            update({ duration: r2((nout - inVal) / rate), data: { ...md, sourceIn: r2(inVal), sourceOut: r2(nout) } })
+          }
+          return (
+            <>
+              <Field label="Speed">
+                <div className="flex items-center gap-1">
+                  <NumberInput value={r2(rate)} min={RATE_MIN} max={RATE_MAX} step={0.05} onChange={setSpeed} />
+                  <span className="text-[10px] text-gray-500">×</span>
+                </div>
+              </Field>
+              <div className="grid grid-cols-2 gap-2">
+                <Field label="In (s)">
+                  <NumberInput value={r2(inVal)} min={0} max={outVal} step={0.1} onChange={setIn} />
+                </Field>
+                <Field label="Out (s)">
+                  <NumberInput value={r2(outVal)} min={inVal} max={md.originalDuration} step={0.1} onChange={setOut} />
+                </Field>
+              </div>
+            </>
+          )
+        })()}
       </Section>
 
       {/* Position (not for audio — audio has no visual) */}
@@ -173,6 +218,16 @@ export default function PropertiesPanel({ object: obj, zoom, dispatch, globalTim
             value={Math.round(effVal('rotation') * 180 / Math.PI * 10) / 10}
             step={1}
             onChange={(v) => dispatchPose('rotation', v * Math.PI / 180, false)}
+          />
+        </Field>
+        {/* Pin: keep this object at the full frame regardless of any camera zoom. */}
+        <Field label="Ignore zoom">
+          <input
+            type="checkbox"
+            checked={obj.ignoreCamera ?? false}
+            onChange={(e) => update({ ignoreCamera: e.target.checked })}
+            title="When on, this object stays fixed at the full frame and is not affected by camera zooms"
+            className="accent-indigo-500 cursor-pointer"
           />
         </Field>
       </Section>
@@ -304,7 +359,7 @@ export default function PropertiesPanel({ object: obj, zoom, dispatch, globalTim
           <Field label="Line width">
             <NumberInput value={obj.style.lineWidth} min={1} max={20} step={1} onChange={(v) => updateStyle({ lineWidth: v })} />
           </Field>
-          {(obj.type === 'text') && (
+          {obj.type === 'text' && (obj.data as TextData).autoSize === false && (
             <Field label="Font size">
               <NumberInput value={obj.style.fontSize ?? 32} min={8} max={200} step={1} onChange={(v) => updateStyle({ fontSize: v })} />
             </Field>
@@ -333,11 +388,41 @@ export default function PropertiesPanel({ object: obj, zoom, dispatch, globalTim
               <option value="monospace">Mono</option>
             </select>
           </Field>
+          {/* Auto-size: fill the box (default). When off, the manual Font size field appears above. */}
+          <Field label="Auto-size">
+            <input
+              type="checkbox"
+              checked={(obj.data as TextData).autoSize !== false}
+              onChange={(e) => updateData({ autoSize: e.target.checked }, { autoSize: e.target.checked })}
+              title="When on, the text is sized to fill its box. When off, use the Font size field."
+              className="accent-indigo-500 cursor-pointer"
+            />
+          </Field>
+          <Field label="Align">
+            <select
+              value={(obj.data as TextData).align ?? 'center'}
+              onChange={(e) => updateData({ align: e.target.value as TextAlign }, { align: e.target.value })}
+              className={SELECT_CLS}
+            >
+              <option value="left">Left</option>
+              <option value="center">Centre</option>
+              <option value="right">Right</option>
+              <option value="justify">Justify</option>
+            </select>
+          </Field>
           <Field label="Bold">
             <input
               type="checkbox"
               checked={(obj.style.fontWeight ?? 'bold') === 'bold'}
               onChange={(e) => updateStyle({ fontWeight: e.target.checked ? 'bold' : 'normal' })}
+              className="accent-indigo-500 cursor-pointer"
+            />
+          </Field>
+          <Field label="Italic">
+            <input
+              type="checkbox"
+              checked={(obj.style.fontStyle ?? 'normal') === 'italic'}
+              onChange={(e) => updateStyle({ fontStyle: e.target.checked ? 'italic' : 'normal' })}
               className="accent-indigo-500 cursor-pointer"
             />
           </Field>
@@ -348,7 +433,8 @@ export default function PropertiesPanel({ object: obj, zoom, dispatch, globalTim
                 checked={(obj.data as TextData).background != null}
                 onChange={(e) => {
                   const data = obj.data as TextData
-                  update({ data: { ...data, background: e.target.checked ? (data.background ?? '#000000') : undefined } })
+                  const next = e.target.checked ? (data.background ?? '#000000') : undefined
+                  updateData({ background: next }, { background: next })
                 }}
                 className="accent-indigo-500 cursor-pointer"
               />
@@ -356,7 +442,7 @@ export default function PropertiesPanel({ object: obj, zoom, dispatch, globalTim
                 <input
                   type="color"
                   value={(obj.data as TextData).background ?? '#000000'}
-                  onChange={(e) => update({ data: { ...(obj.data as TextData), background: e.target.value } })}
+                  onChange={(e) => updateData({ background: e.target.value }, { background: e.target.value })}
                   className="w-8 h-6 bg-transparent border-none cursor-pointer"
                 />
               )}
@@ -372,10 +458,7 @@ export default function PropertiesPanel({ object: obj, zoom, dispatch, globalTim
             <input
               type="checkbox"
               checked={(obj.data as ArrowData).progressiveHead ?? true}
-              onChange={(e) => {
-                const arrowData = obj.data as ArrowData
-                update({ data: { ...arrowData, progressiveHead: e.target.checked } })
-              }}
+              onChange={(e) => updateData({ progressiveHead: e.target.checked }, { progressiveHead: e.target.checked })}
               className="accent-indigo-500 cursor-pointer"
             />
           </Field>
@@ -386,13 +469,10 @@ export default function PropertiesPanel({ object: obj, zoom, dispatch, globalTim
                 min={-100} max={100} step={1}
                 value={Math.round(((obj.data as ArrowData).curvature ?? 0) * 100)}
                 onChange={(e) => {
-                  const arrowData = obj.data as ArrowData
-                  update({ data: { ...arrowData, curvature: Number(e.target.value) / 100 } })
+                  const curvature = Number(e.target.value) / 100
+                  updateData({ curvature }, { curvature })
                 }}
-                onDoubleClick={() => {
-                  const arrowData = obj.data as ArrowData
-                  update({ data: { ...arrowData, curvature: 0 } })
-                }}
+                onDoubleClick={() => updateData({ curvature: 0 }, { curvature: 0 })}
                 className="w-full"
               />
               <span className="text-[10px] text-gray-500 tabular-nums w-8 text-right">

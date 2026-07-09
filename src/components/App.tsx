@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 import type { InteractionMode, TimelineObjectType, TimelineObject, ArrowData, FreehandData } from '../types'
 import { createTimelineObject, createCameraZoom } from '../types'
+import { getRememberedStyle, getRememberedData } from '../lib/objectDefaults'
 import { useProject } from '../hooks/useProject'
 import { usePlayback } from '../hooks/usePlayback'
 import { useAudioPlayback } from '../hooks/useAudioPlayback'
@@ -156,13 +157,16 @@ export default function App() {
       setSelectedObjectId(last.id)
       setSelectedZoomId(null) // object/zoom selection are mutually exclusive
     }
+    // Adding/importing anything drops back to Frame view so the new object is visible + editable
+    // (Live view hides the whole scene outside the zoom and disables editing).
+    setCameraView('frame')
     return withLanes
   }, [project.objects, dispatch])
 
   const handleCreateObject = useCallback((type: TimelineObjectType) => {
     const defaultData: Record<TimelineObjectType, () => ReturnType<typeof createTimelineObject>['data']> = {
       arrow: () => ({ points: [], headSize: 20, curvature: 0, progressiveHead: true }),
-      text: () => ({ content: 'Text' }),
+      text: () => ({ content: 'Text', align: 'center', autoSize: true }),
       rectangle: () => ({} as Record<string, never>),
       circle: () => ({} as Record<string, never>),
       freehand: () => ({ strokes: [] }),
@@ -171,13 +175,22 @@ export default function App() {
       video: () => ({ assetId: '', volume: 1, originalDuration: 0 }),
     }
 
-    const obj = createTimelineObject(type, defaultData[type](), {
+    // Seed new objects from the last-used settings for this type (colour, size, bold/italic,
+    // text background/align, arrow head/curve, …) so they carry forward like most editors do.
+    const baseData = defaultData[type]()
+    const rememberedData = getRememberedData(type)
+    const data = rememberedData
+      ? ({ ...(baseData as object), ...rememberedData } as ReturnType<typeof createTimelineObject>['data'])
+      : baseData
+
+    const obj = createTimelineObject(type, data, {
       startTime: playback.globalTime,
       duration: 5,
       x: type === 'text' ? 0.3 : 0,
       y: type === 'text' ? 0.4 : 0,
       width: type === 'text' ? 0.4 : 1,
       height: type === 'text' ? 0.2 : 1,
+      style: getRememberedStyle(type),
     })
 
     addObjects([obj])
@@ -236,6 +249,23 @@ export default function App() {
         handleSetMode('move')
       } else if (e.key === 'd' && drawEnabled) {
         handleSetMode('draw')
+      } else if (e.key === 'h' || e.key === 'H') {
+        // Toggle hidden on the selected object OR zoom (spec 14 R11; selection is mutually exclusive).
+        if (selectedObject) {
+          dispatch({ type: 'UPDATE_OBJECT', objectId: selectedObject.id, updates: { hidden: !selectedObject.hidden } })
+        } else if (selectedZoom) {
+          dispatch({ type: 'UPDATE_ZOOM', zoomId: selectedZoom.id, updates: { hidden: !selectedZoom.hidden } })
+        }
+      } else if (e.key === 's' || e.key === 'S') {
+        // Slice a selected audio/video clip at the playhead (spec 14 R10). No-op unless the
+        // playhead is strictly inside the clip. The left half reuses the original id, so the
+        // current selection stays on it (R10.6) — no re-selection needed.
+        if (selectedObject && (selectedObject.type === 'audio' || selectedObject.type === 'video')) {
+          const t = playback.globalTime
+          if (t > selectedObject.startTime && t < selectedObject.startTime + selectedObject.duration) {
+            dispatch({ type: 'SPLIT_OBJECT', objectId: selectedObject.id, globalTime: t })
+          }
+        }
       } else if (e.key === 'Enter' && interactionMode === 'draw' && selectedObject?.type === 'arrow') {
         // Finish arrow drawing with Enter
         const data = selectedObject.data as ArrowData
