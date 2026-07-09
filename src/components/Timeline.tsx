@@ -1,6 +1,7 @@
 import { useRef, useCallback, useState, useEffect } from 'react'
-import type { TimelineObject, ProjectAction, AudioData, VideoData } from '../types'
+import type { TimelineObject, ProjectAction, AudioData, VideoData, CameraZoom } from '../types'
 import { keyframeColor } from '../lib/keyframes'
+import { zoomEnvelope } from '../lib/camera'
 
 type TimelineProps = {
   objects: TimelineObject[]
@@ -10,16 +11,22 @@ type TimelineProps = {
   onSelectObject: (id: string | null) => void
   onSeek: (time: number) => void
   dispatch: React.Dispatch<ProjectAction>
+  // Camera zooms (spec 13)
+  zooms?: CameraZoom[]
+  selectedZoomId: string | null
+  onSelectZoom: (id: string | null) => void
 }
 
 const LANE_HEIGHT = 32
 const LANE_GAP = 2
 const RULER_HEIGHT = 24
+const CAMERA_TRACK_HEIGHT = 32
 const GUTTER_WIDTH = 32
 const MIN_PIXELS_PER_SECOND = 20
 const MAX_PIXELS_PER_SECOND = 400
 const DEFAULT_PIXELS_PER_SECOND = 80
 const TIMELINE_PADDING_SECONDS = 5
+const ZOOM_COLOR = '#f59e0b' // amber — matches the canvas framing rect + zoom panel
 
 const formatTime = (seconds: number): string => {
   const m = Math.floor(seconds / 60)
@@ -45,6 +52,11 @@ type DragState =
   | { kind: 'resize-right'; objectId: string; startMouseX: number; originalDuration: number }
   | { kind: 'move-keyframe'; objectId: string; kfIndex: number; startMouseX: number; originalTime: number; minTime: number; maxTime: number }
   | { kind: 'playhead'; startMouseX: number; startTime: number }
+  // Camera-zoom bars on the pinned Camera track (spec 13). Move shifts startTime; resizing
+  // adjusts the zoom's `hold` (the flexible middle of the envelope), anchored at the opposite edge.
+  | { kind: 'zoom-move'; zoomId: string; startMouseX: number; originalStartTime: number }
+  | { kind: 'zoom-resize-right'; zoomId: string; startMouseX: number; originalHold: number }
+  | { kind: 'zoom-resize-left'; zoomId: string; startMouseX: number; originalStartTime: number; originalHold: number }
 
 export default function Timeline({
   objects,
@@ -54,6 +66,9 @@ export default function Timeline({
   onSelectObject,
   onSeek,
   dispatch,
+  zooms,
+  selectedZoomId,
+  onSelectZoom,
 }: TimelineProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [pixelsPerSecond, setPixelsPerSecond] = useState(DEFAULT_PIXELS_PER_SECOND)
@@ -203,11 +218,28 @@ export default function Timeline({
             updates: { keyframes: obj.keyframes.map((k, j) => (j === dragState.kfIndex ? { ...k, time: t } : k)) },
           })
         }
+      } else if (dragState.kind === 'zoom-move') {
+        const newStart = Math.round(Math.max(0, dragState.originalStartTime + dt) * 10) / 10
+        dispatch({ type: 'UPDATE_ZOOM_TRANSIENT', zoomId: dragState.zoomId, updates: { startTime: newStart } })
+      } else if (dragState.kind === 'zoom-resize-right') {
+        // Grow/shrink the hold; start + transitions stay put.
+        const newHold = Math.round(Math.max(0, dragState.originalHold + dt) * 10) / 10
+        dispatch({ type: 'UPDATE_ZOOM_TRANSIENT', zoomId: dragState.zoomId, updates: { hold: newHold } })
+      } else if (dragState.kind === 'zoom-resize-left') {
+        // Move the start while keeping the right edge fixed → hold shrinks by the same amount.
+        // Clamp so hold never goes negative (start can't cross the fixed end).
+        const clampedDt = Math.max(-dragState.originalStartTime, Math.min(dragState.originalHold, dt))
+        const newStart = Math.round((dragState.originalStartTime + clampedDt) * 10) / 10
+        const newHold = Math.round((dragState.originalHold - clampedDt) * 10) / 10
+        dispatch({ type: 'UPDATE_ZOOM_TRANSIENT', zoomId: dragState.zoomId, updates: { startTime: newStart, hold: newHold } })
       }
     }
 
     const handleMouseUp = () => {
-      if (dragState.kind === 'move' || dragState.kind === 'move-keyframe') {
+      if (
+        dragState.kind === 'move' || dragState.kind === 'move-keyframe' ||
+        dragState.kind === 'zoom-move' || dragState.kind === 'zoom-resize-right' || dragState.kind === 'zoom-resize-left'
+      ) {
         dispatch({ type: 'COMMIT_TRANSIENT' })
       }
       setDragState(null)
@@ -243,6 +275,15 @@ export default function Timeline({
         <div className="flex-shrink-0 flex flex-col" style={{ width: GUTTER_WIDTH }}>
           {/* Spacer for ruler */}
           <div className="bg-gray-800 border-b border-gray-700" style={{ height: RULER_HEIGHT }} />
+
+          {/* Camera track label (pinned, spec 13) */}
+          <div
+            className="w-full flex items-center justify-center border-b border-gray-700 text-amber-500"
+            style={{ height: CAMERA_TRACK_HEIGHT }}
+            title="Camera zooms"
+          >
+            <span className="text-sm leading-none">⛶</span>
+          </div>
 
           {/* Add lane above CTA (dedicated blank lane row) */}
           <button
@@ -325,6 +366,96 @@ export default function Timeline({
               ))}
             </div>
 
+            {/* Camera track (pinned, spec 13): zoom envelope bars — not an object lane. */}
+            <div
+              className="relative border-b border-gray-800"
+              style={{ height: CAMERA_TRACK_HEIGHT, background: 'rgba(245,158,11,0.04)' }}
+              onMouseDown={(e) => {
+                // Click empty camera track: deselect any zoom + seek
+                if (e.target === e.currentTarget) {
+                  onSelectZoom(null)
+                  const rect = containerRef.current?.getBoundingClientRect()
+                  if (!rect) return
+                  const scrollLeft = containerRef.current?.scrollLeft ?? 0
+                  const x = e.clientX - rect.left + scrollLeft
+                  onSeek(xToTime(x))
+                }
+              }}
+            >
+              {(zooms ?? []).map((zoom) => {
+                const env = zoomEnvelope(zoom)
+                const left = timeToX(zoom.startTime)
+                const width = Math.max(timeToX(env), 8)
+                const inW = timeToX(zoom.transitionIn)
+                const outW = timeToX(zoom.transitionOut)
+                const isSelected = zoom.id === selectedZoomId
+                return (
+                  <div
+                    key={zoom.id}
+                    className="absolute top-0 group"
+                    style={{ left, top: 2, width, height: CAMERA_TRACK_HEIGHT - 4 }}
+                  >
+                    {/* Left resize handle (adjusts hold, right edge fixed) */}
+                    <div
+                      className="absolute left-0 top-0 w-1.5 h-full cursor-col-resize z-40 hover:bg-white/40"
+                      onMouseDown={(e) => {
+                        e.stopPropagation()
+                        onSelectZoom(zoom.id)
+                        setDragState({ kind: 'zoom-resize-left', zoomId: zoom.id, startMouseX: e.clientX, originalStartTime: zoom.startTime, originalHold: zoom.hold })
+                      }}
+                    />
+
+                    {/* Bar body (drag to retime) */}
+                    <div
+                      className="absolute inset-0 rounded-sm overflow-hidden cursor-grab active:cursor-grabbing"
+                      style={{
+                        backgroundColor: ZOOM_COLOR,
+                        opacity: isSelected ? 1 : 0.72,
+                        outline: isSelected ? '2px solid white' : 'none',
+                        outlineOffset: -1,
+                      }}
+                      onMouseDown={(e) => {
+                        e.stopPropagation()
+                        onSelectZoom(zoom.id)
+                        setDragState({ kind: 'zoom-move', zoomId: zoom.id, startMouseX: e.clientX, originalStartTime: zoom.startTime })
+                      }}
+                    >
+                      {/* transition-in ramp (left) */}
+                      {zoom.transitionIn > 0 && (
+                        <div
+                          className="absolute top-0 left-0 h-full pointer-events-none"
+                          style={{ width: Math.min(inW, width), background: 'linear-gradient(90deg, rgba(0,0,0,0.4), transparent)' }}
+                        />
+                      )}
+                      {/* transition-out ramp (right) */}
+                      {zoom.transitionOut > 0 && (
+                        <div
+                          className="absolute top-0 right-0 h-full pointer-events-none"
+                          style={{ width: Math.min(outW, width), background: 'linear-gradient(270deg, rgba(0,0,0,0.4), transparent)' }}
+                        />
+                      )}
+                      <span className="relative text-[10px] text-black/90 px-1.5 truncate leading-7 pointer-events-none font-semibold">
+                        ⛶ {zoom.scale.toFixed(1)}×
+                      </span>
+                    </div>
+
+                    {/* Right resize handle (adjusts hold, left edge fixed) */}
+                    <div
+                      className="absolute right-0 top-0 w-2 h-full cursor-col-resize z-40"
+                      style={{ background: 'rgba(255,255,255,0.25)' }}
+                      onMouseEnter={(e) => { if (!dragState) (e.currentTarget.style.background = 'rgba(255,255,255,0.5)') }}
+                      onMouseLeave={(e) => { (e.currentTarget.style.background = 'rgba(255,255,255,0.25)') }}
+                      onMouseDown={(e) => {
+                        e.stopPropagation()
+                        onSelectZoom(zoom.id)
+                        setDragState({ kind: 'zoom-resize-right', zoomId: zoom.id, startMouseX: e.clientX, originalHold: zoom.hold })
+                      }}
+                    />
+                  </div>
+                )
+              })}
+            </div>
+
             {/* Blank lane spacer for "add above" CTA alignment */}
             <div style={{ height: LANE_HEIGHT }} />
 
@@ -336,6 +467,7 @@ export default function Timeline({
                 // Click empty area to deselect
                 if (e.target === e.currentTarget) {
                   onSelectObject(null)
+                  onSelectZoom(null)
                   // Also seek
                   const rect = containerRef.current?.getBoundingClientRect()
                   if (!rect) return

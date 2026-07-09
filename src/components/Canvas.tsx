@@ -1,15 +1,18 @@
 import { useRef, useEffect, useState, useCallback, useMemo } from 'react'
-import type { TimelineObject, InteractionMode, ProjectAction, ArrowData, FreehandData } from '../types'
+import type { TimelineObject, InteractionMode, ProjectAction, ArrowData, FreehandData, CameraZoom } from '../types'
 import { useCanvasRenderer } from '../hooks/useCanvasRenderer'
 import type { EditorOptions } from '../lib/renderer'
 import { segmentControlPoint } from '../lib/annotations'
 import { resolvePose, editPose, activeKeyframeIndex, keyframeColor } from '../lib/keyframes'
+import { resolveCamera, cameraFrameRect, isIdentityCamera, governingZoomAt } from '../lib/camera'
 
 const ARROW_MAX_POINTS = 10
+const ZOOM_ACCENT = '#f59e0b' // amber — matches the zoom panel header
 
 // === Types ===
 
 type HandleId = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w'
+type ZoomCorner = 'nw' | 'ne' | 'se' | 'sw'
 
 type DragState =
   | null
@@ -45,6 +48,23 @@ type DragState =
       kind: 'draw-freehand'
       objectId: string
     }
+  | {
+      // Camera-zoom framing rectangle move: shifts the focal point (spec 13).
+      kind: 'zoom-move'
+      zoomId: string
+      startNx: number
+      startNy: number
+      origX: number
+      origY: number
+      scale: number
+    }
+  | {
+      // Camera-zoom framing rectangle resize: changes scale about the fixed focal point.
+      kind: 'zoom-resize'
+      zoomId: string
+      cx: number
+      cy: number
+    }
 
 type CanvasProps = {
   objects: TimelineObject[]
@@ -56,6 +76,12 @@ type CanvasProps = {
   interactionMode: InteractionMode
   dispatch: React.Dispatch<ProjectAction>
   onFinishArrow?: () => void
+  // Camera zooms (spec 13)
+  zooms?: CameraZoom[]
+  selectedZoomId: string | null
+  onSelectZoom: (id: string | null) => void
+  cameraView: 'frame' | 'live'
+  onToggleCameraView: () => void
 }
 
 // === Constants ===
@@ -64,6 +90,8 @@ const HANDLE_SIZE = 10 // canvas pixels
 const ROTATION_HANDLE_DISTANCE = 30 // canvas pixels
 const HANDLE_HIT_RADIUS = 14 // canvas pixels, generous for easy clicking
 const MIN_SIZE = 0.01 // minimum object size in normalized coords
+const MIN_ZOOM_SCALE = 1 // full frame (spec 13: scale >= 1 only)
+const MAX_ZOOM_SCALE = 20 // sanity cap for on-canvas resize
 
 // === Coordinate Helpers ===
 
@@ -344,6 +372,54 @@ function getHandleCursor(
   return 'nwse-resize'
 }
 
+// === Camera-zoom framing rect (spec 13) ===
+// The framing rect is axis-aligned (no rotation) and always keeps the canvas aspect ratio
+// (w = h = 1/scale in normalized coords), so its editing math is much simpler than an object's.
+
+/** Clamp a focal point so the framing rect stays fully inside the canvas [0,1]. */
+function clampFocal(x: number, y: number, scale: number): { x: number; y: number } {
+  const half = 0.5 / scale
+  return {
+    x: Math.min(Math.max(x, half), 1 - half),
+    y: Math.min(Math.max(y, half), 1 - half),
+  }
+}
+
+/** Which corner handle (if any) of a normalized framing rect is under the cursor. */
+function hitTestZoomHandle(
+  nx: number, ny: number,
+  rect: { x: number; y: number; w: number; h: number },
+  canvasW: number, canvasH: number,
+): ZoomCorner | null {
+  const hrx = HANDLE_HIT_RADIUS / canvasW
+  const hry = HANDLE_HIT_RADIUS / canvasH
+  const corners: [ZoomCorner, number, number][] = [
+    ['nw', rect.x, rect.y],
+    ['ne', rect.x + rect.w, rect.y],
+    ['se', rect.x + rect.w, rect.y + rect.h],
+    ['sw', rect.x, rect.y + rect.h],
+  ]
+  for (const [id, hx, hy] of corners) {
+    if (Math.abs(nx - hx) < hrx && Math.abs(ny - hy) < hry) return id
+  }
+  return null
+}
+
+/** Is the cursor inside the framing rect body (normalized coords)? */
+function hitTestZoomBody(
+  nx: number, ny: number,
+  rect: { x: number; y: number; w: number; h: number },
+): boolean {
+  return nx >= rect.x && nx <= rect.x + rect.w && ny >= rect.y && ny <= rect.y + rect.h
+}
+
+/** New scale from a corner drag, keeping the focal point (center) fixed. */
+function scaleFromCornerDrag(nx: number, ny: number, cx: number, cy: number): number {
+  const half = Math.max(Math.abs(nx - cx), Math.abs(ny - cy))
+  const scale = half > 1e-4 ? 0.5 / half : MAX_ZOOM_SCALE
+  return Math.min(Math.max(scale, MIN_ZOOM_SCALE), MAX_ZOOM_SCALE)
+}
+
 // === Component ===
 
 export default function Canvas({
@@ -356,6 +432,11 @@ export default function Canvas({
   interactionMode,
   dispatch,
   onFinishArrow,
+  zooms,
+  selectedZoomId,
+  onSelectZoom,
+  cameraView,
+  onToggleCameraView,
 }: CanvasProps) {
   const renderCanvasRef = useRef<HTMLCanvasElement>(null)
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null)
@@ -365,23 +446,33 @@ export default function Canvas({
   const mouseNormRef = useRef<{ nx: number; ny: number } | null>(null)
   const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number } | null>(null)
 
+  const isLive = cameraView === 'live'
+  const selectedZoom = zooms?.find((z) => z.id === selectedZoomId) ?? null
+
+  // Live view applies the real camera transform (WYSIWYG == export); Frame view renders un-zoomed
+  // (identity) so the whole scene stays visible + editable. Recomputed each render so it tracks the
+  // playhead while playing (spec 13 R6).
+  const liveCamera = useMemo(
+    () => (isLive ? resolveCamera(zooms, globalTime) : undefined),
+    [isLive, zooms, globalTime],
+  )
+
   const activeDrawingObjectId = dragState?.kind === 'draw-freehand' ? dragState.objectId : null
   const editorOpts = useMemo<EditorOptions>(() => ({
-    editorMode: true,
+    editorMode: !isLive, // Live view = WYSIWYG, no editor ghosts
     activeDrawingObjectId,
-  }), [activeDrawingObjectId])
-  useCanvasRenderer(renderCanvasRef, objects, globalTime, isPlaying, editorOpts)
+    camera: liveCamera,
+  }), [isLive, activeDrawingObjectId, liveCamera])
+  useCanvasRenderer(renderCanvasRef, objects, globalTime, isPlaying, width, height, editorOpts)
 
   // Keep dragStateRef in sync for use in event handlers
   dragStateRef.current = dragState
 
-  // Set canvas dimensions
+  // Size the overlay canvas's backing store. The render canvas is sized by useCanvasRenderer
+  // (which also redraws on resize), so we only own the overlay here.
   useEffect(() => {
-    const rc = renderCanvasRef.current
     const oc = overlayCanvasRef.current
-    if (!rc || !oc) return
-    rc.width = width
-    rc.height = height
+    if (!oc) return
     oc.width = width
     oc.height = height
   }, [width, height])
@@ -416,6 +507,62 @@ export default function Canvas({
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)'
     ctx.lineWidth = 2
     ctx.strokeRect(1, 1, width - 2, height - 2)
+
+    // Live view is playback/confirmation only (R6): the render canvas already shows the real
+    // transform, and editing handles are hidden. So draw no authoring chrome.
+    if (isLive) return
+
+    // --- Camera framing overlay (spec 13, Frame view) ---
+    // A selected zoom shows its editable target rect (with handles); otherwise the resolved
+    // camera at the playhead is shown read-only and animates as the playhead moves.
+    {
+      const framedPose = selectedZoom
+        ? { x: selectedZoom.x, y: selectedZoom.y, scale: selectedZoom.scale }
+        : resolveCamera(zooms, globalTime)
+      if (selectedZoom != null || !isIdentityCamera(framedPose)) {
+        const r = cameraFrameRect(framedPose)
+        const rx = r.x * width, ry = r.y * height, rw = r.w * width, rh = r.h * height
+
+        // Grey scrim over everything, punched out at the framed region.
+        ctx.save()
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.5)'
+        ctx.fillRect(0, 0, width, height)
+        ctx.clearRect(rx, ry, rw, rh)
+        ctx.restore()
+
+        // Framing rectangle border (solid + handles when selected, dashed preview otherwise).
+        ctx.strokeStyle = ZOOM_ACCENT
+        ctx.lineWidth = selectedZoom ? 3 : 2
+        ctx.setLineDash(selectedZoom ? [] : [8, 5])
+        ctx.strokeRect(rx, ry, rw, rh)
+        ctx.setLineDash([])
+
+        if (selectedZoom) {
+          const hs = HANDLE_SIZE
+          const corners: [number, number][] = [
+            [rx, ry], [rx + rw, ry], [rx + rw, ry + rh], [rx, ry + rh],
+          ]
+          for (const [hx, hy] of corners) {
+            ctx.fillStyle = '#ffffff'
+            ctx.strokeStyle = ZOOM_ACCENT
+            ctx.lineWidth = 1.5
+            ctx.fillRect(hx - hs / 2, hy - hs / 2, hs, hs)
+            ctx.strokeRect(hx - hs / 2, hy - hs / 2, hs, hs)
+          }
+          // Amount label tab
+          const label = `⛶ ${selectedZoom.scale.toFixed(1)}×`
+          ctx.font = 'bold 13px sans-serif'
+          const tabW = ctx.measureText(label).width + 12
+          const tabH = 18
+          ctx.fillStyle = ZOOM_ACCENT
+          ctx.fillRect(rx, ry - tabH, tabW, tabH)
+          ctx.fillStyle = '#ffffff'
+          ctx.textBaseline = 'middle'
+          ctx.textAlign = 'left'
+          ctx.fillText(label, rx + 6, ry - tabH / 2 + 1)
+        }
+      }
+    }
 
     if (!selectedObject) return
 
@@ -569,7 +716,7 @@ export default function Canvas({
     ctx.stroke()
 
     ctx.restore()
-  }, [selectedObject, interactionMode, width, height, selColor, selWidth, activeKfIdx])
+  }, [selectedObject, interactionMode, width, height, selColor, selWidth, activeKfIdx, isLive, zooms, selectedZoom, globalTime])
 
   useEffect(() => {
     drawOverlay()
@@ -596,13 +743,60 @@ export default function Canvas({
     return true
   }, [selectedObject, dispatch, onFinishArrow, width, height])
 
+  // Apply an in-progress zoom framing-rect drag (move or resize) as a transient update.
+  const applyZoomDrag = useCallback((ds: DragState, nx: number, ny: number) => {
+    if (!ds) return
+    if (ds.kind === 'zoom-move') {
+      const focal = clampFocal(ds.origX + (nx - ds.startNx), ds.origY + (ny - ds.startNy), ds.scale)
+      dispatch({ type: 'UPDATE_ZOOM_TRANSIENT', zoomId: ds.zoomId, updates: { x: focal.x, y: focal.y } })
+    } else if (ds.kind === 'zoom-resize') {
+      const scale = scaleFromCornerDrag(nx, ny, ds.cx, ds.cy)
+      const focal = clampFocal(ds.cx, ds.cy, scale)
+      dispatch({ type: 'UPDATE_ZOOM_TRANSIENT', zoomId: ds.zoomId, updates: { scale, x: focal.x, y: focal.y } })
+    }
+  }, [dispatch])
+
   const handleMouseDown = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
       const canvas = overlayCanvasRef.current
       if (!canvas) return
-      if (!selectedObject) return
 
       const { nx, ny } = clientToNorm(e, canvas)
+
+      // --- Camera zoom editing (Frame view only; Live view is playback-only, R6) ---
+      if (!isLive && e.button === 0) {
+        if (selectedZoom) {
+          const rect = cameraFrameRect({ x: selectedZoom.x, y: selectedZoom.y, scale: selectedZoom.scale })
+          const corner = hitTestZoomHandle(nx, ny, rect, width, height)
+          if (corner) {
+            setDragState({ kind: 'zoom-resize', zoomId: selectedZoom.id, cx: selectedZoom.x, cy: selectedZoom.y })
+            return
+          }
+          if (hitTestZoomBody(nx, ny, rect)) {
+            setDragState({
+              kind: 'zoom-move', zoomId: selectedZoom.id,
+              startNx: nx, startNy: ny, origX: selectedZoom.x, origY: selectedZoom.y, scale: selectedZoom.scale,
+            })
+            return
+          }
+          // Clicked outside the selected zoom's rect — keep selection (deselect via Esc/timeline).
+          return
+        }
+        // Nothing selected: clicking an active resolved framing rect selects its zoom. Guarded on
+        // !selectedObject so this never steals a click meant for a selected object.
+        if (!selectedObject) {
+          const cam = resolveCamera(zooms, globalTime)
+          if (!isIdentityCamera(cam) && hitTestZoomBody(nx, ny, cameraFrameRect(cam))) {
+            const gz = governingZoomAt(zooms, globalTime)
+            if (gz) {
+              onSelectZoom(gz.id)
+              return
+            }
+          }
+        }
+      }
+
+      if (!selectedObject) return
 
       // --- Draw mode ---
       if (interactionMode === 'draw') {
@@ -679,7 +873,7 @@ export default function Canvas({
 
       // Clicking empty space does nothing — deselect via Escape or timeline
     },
-    [interactionMode, selectedObject, width, height, dispatch],
+    [interactionMode, selectedObject, width, height, dispatch, isLive, selectedZoom, zooms, globalTime, onSelectZoom],
   )
 
   const handleMouseMove = useCallback(
@@ -695,6 +889,11 @@ export default function Canvas({
       setTooltipPos({ x: e.clientX - rect.left + 15, y: e.clientY - rect.top + 15 })
 
       const ds = dragStateRef.current
+
+      if (ds && (ds.kind === 'zoom-move' || ds.kind === 'zoom-resize')) {
+        applyZoomDrag(ds, nx, ny)
+        return
+      }
 
       if (ds) {
         // --- Active drag --- keyframe-aware: editPose cements a keyframe for a keyframed
@@ -753,6 +952,23 @@ export default function Canvas({
       }
 
       // --- Hover cursor feedback ---
+      if (isLive) {
+        setCursor('default')
+        return
+      }
+
+      // Zoom framing rect hover (Frame view, zoom selected)
+      if (selectedZoom) {
+        const rect = cameraFrameRect({ x: selectedZoom.x, y: selectedZoom.y, scale: selectedZoom.scale })
+        const corner = hitTestZoomHandle(nx, ny, rect, width, height)
+        if (corner) {
+          setCursor(corner === 'nw' || corner === 'se' ? 'nwse-resize' : 'nesw-resize')
+          return
+        }
+        setCursor(hitTestZoomBody(nx, ny, rect) ? 'move' : 'default')
+        return
+      }
+
       if (interactionMode === 'draw') {
         setCursor('crosshair')
         // Redraw overlay for rubber band preview
@@ -776,7 +992,7 @@ export default function Canvas({
 
       setCursor('default')
     },
-    [interactionMode, selectedObject, selectedObjectRaw, width, height, dispatch, drawOverlay, globalTime],
+    [interactionMode, selectedObject, selectedObjectRaw, width, height, dispatch, drawOverlay, globalTime, applyZoomDrag, isLive, selectedZoom],
   )
 
   const handleMouseUp = useCallback(() => {
@@ -797,6 +1013,11 @@ export default function Canvas({
       const { nx, ny } = clientToNorm(e, canvas)
       const ds = dragStateRef.current
       if (!ds) return
+
+      if (ds.kind === 'zoom-move' || ds.kind === 'zoom-resize') {
+        applyZoomDrag(ds, nx, ny)
+        return
+      }
 
       const dragObj = objects.find((o) => o.id === ds.objectId)
       const t = dragObj ? globalTime - dragObj.startTime : 0
@@ -862,7 +1083,7 @@ export default function Canvas({
       window.removeEventListener('mousemove', onMove)
       window.removeEventListener('mouseup', onUp)
     }
-  }, [dragState, dispatch, objects, width, height, globalTime])
+  }, [dragState, dispatch, objects, width, height, globalTime, applyZoomDrag])
 
   // --- Right-click: finish arrow drawing ---
   const handleContextMenu = useCallback(
@@ -943,6 +1164,20 @@ export default function Canvas({
             {tooltipText}
           </div>
         )}
+
+        {/* Frame / Live camera view toggle (spec 13, R7). Frame = author un-zoomed with a framing
+            rectangle; Live = the real push-in (WYSIWYG, matches export). Shortcut: V. */}
+        <button
+          onClick={onToggleCameraView}
+          title={isLive ? 'Showing the real camera push-in — click for Frame view (V)' : 'Author view — click for Live push-in preview (V)'}
+          className={`absolute top-2 right-2 px-2.5 py-1 text-xs font-semibold rounded shadow cursor-pointer transition-colors ${
+            isLive
+              ? 'bg-amber-500 text-black hover:bg-amber-400'
+              : 'bg-gray-800/90 text-gray-200 hover:bg-gray-700'
+          }`}
+        >
+          {isLive ? '● Live' : '○ Frame'}
+        </button>
       </div>
     </div>
   )

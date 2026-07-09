@@ -49,6 +49,20 @@ function projectReducer(state: UndoableState, action: ProjectAction): UndoableSt
     }
   }
 
+  if (action.type === 'UPDATE_ZOOM_TRANSIENT') {
+    const newProject = applyAction(state.present, {
+      type: 'UPDATE_ZOOM',
+      zoomId: action.zoomId,
+      updates: action.updates,
+    })
+    if (newProject === state.present) return state
+    return {
+      ...state,
+      present: newProject,
+      transientSnapshot: state.transientSnapshot ?? state.present,
+    }
+  }
+
   if (action.type === 'COMMIT_TRANSIENT') {
     if (!state.transientSnapshot) return state
     return {
@@ -78,6 +92,10 @@ function applyAction(project: Project, action: ProjectAction): Project {
     case 'SET_NAME':
       return { ...project, name: action.name }
 
+    case 'SET_DIMENSIONS':
+      if (project.width === action.width && project.height === action.height) return project
+      return { ...project, width: action.width, height: action.height }
+
     case 'ADD_OBJECTS':
       return { ...project, objects: [...project.objects, ...action.objects] }
 
@@ -86,6 +104,20 @@ function applyAction(project: Project, action: ProjectAction): Project {
 
     case 'REMOVE_OBJECT':
       return { ...project, objects: project.objects.filter((o) => o.id !== action.objectId) }
+
+    case 'ADD_ZOOM':
+      return { ...project, zooms: [...(project.zooms ?? []), action.zoom] }
+
+    case 'UPDATE_ZOOM':
+      return {
+        ...project,
+        zooms: (project.zooms ?? []).map((z) =>
+          z.id === action.zoomId ? { ...z, ...action.updates } : z,
+        ),
+      }
+
+    case 'REMOVE_ZOOM':
+      return { ...project, zooms: (project.zooms ?? []).filter((z) => z.id !== action.zoomId) }
 
     case 'UPDATE_OBJECT':
       return {

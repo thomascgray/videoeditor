@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 import type { InteractionMode, TimelineObjectType, TimelineObject, ArrowData, FreehandData } from '../types'
-import { createTimelineObject } from '../types'
+import { createTimelineObject, createCameraZoom } from '../types'
 import { useProject } from '../hooks/useProject'
 import { usePlayback } from '../hooks/usePlayback'
 import { useAudioPlayback } from '../hooks/useAudioPlayback'
@@ -8,6 +8,8 @@ import { loadAssetsFromDB } from '../lib/assetStore'
 import { exportProjectBrep, importProjectBrep } from '../lib/projectStorage'
 import Canvas from './Canvas'
 import AnnotationTools from './AnnotationTools'
+import AspectRatioSelector from './AspectRatioSelector'
+import VolumeControl from './VolumeControl'
 import Timeline from './Timeline'
 import PropertiesPanel from './PropertiesPanel'
 import ImportModal from './ImportModal'
@@ -21,15 +23,20 @@ export default function App() {
   useEffect(() => { loadAssetsFromDB() }, [])
 
   // Audio/video playback sync
-  const { isMuted, toggleMute } = useAudioPlayback(project.objects, playback.globalTime, playback.isPlaying)
+  const { isMuted, toggleMute, volume, setVolume } = useAudioPlayback(project.objects, playback.globalTime, playback.isPlaying)
 
   const [interactionMode, setInteractionMode] = useState<InteractionMode>('move')
   const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null)
+  const [selectedZoomId, setSelectedZoomId] = useState<string | null>(null)
+  // Camera view (spec 13): 'frame' = author un-zoomed with a framing rectangle; 'live' = apply the
+  // real transform (WYSIWYG, matches export). Pure view state — not persisted, not part of undo.
+  const [cameraView, setCameraView] = useState<'frame' | 'live'>('frame')
   const [showImport, setShowImport] = useState(false)
   const [showExport, setShowExport] = useState(false)
   const projectFileRef = useRef<HTMLInputElement>(null)
 
   const selectedObject = project.objects.find((o) => o.id === selectedObjectId) ?? null
+  const selectedZoom = project.zooms?.find((z) => z.id === selectedZoomId) ?? null
 
   // Draw mode only enabled when an arrow or freehand object is selected
   const drawEnabled = selectedObject != null && (selectedObject.type === 'arrow' || selectedObject.type === 'freehand')
@@ -145,7 +152,10 @@ export default function App() {
     const withLanes = objects.map((obj, i) => ({ ...obj, lane: maxLane + 1 + i }))
     dispatch({ type: 'ADD_OBJECTS', objects: withLanes })
     const last = withLanes[withLanes.length - 1]
-    if (last) setSelectedObjectId(last.id)
+    if (last) {
+      setSelectedObjectId(last.id)
+      setSelectedZoomId(null) // object/zoom selection are mutually exclusive
+    }
     return withLanes
   }, [project.objects, dispatch])
 
@@ -180,6 +190,30 @@ export default function App() {
     }
   }, [playback.globalTime, addObjects, handleSetMode])
 
+  // Create a camera zoom (spec 13) at the playhead: mirrors + Text (App.handleCreateObject).
+  // Defaults from createCameraZoom; select it (clearing object selection) so its panel + framing
+  // rectangle are immediately editable.
+  const handleCreateZoom = useCallback(() => {
+    const zoom = createCameraZoom({ startTime: playback.globalTime })
+    dispatch({ type: 'ADD_ZOOM', zoom })
+    setSelectedObjectId(null)
+    setSelectedZoomId(zoom.id)
+    setInteractionMode('move')
+    setCameraView('frame') // author the new zoom un-zoomed with its framing rectangle (R8/R15)
+  }, [playback.globalTime, dispatch])
+
+  const handleSelectZoom = useCallback((id: string | null) => {
+    setSelectedZoomId(id)
+    if (id) {
+      setSelectedObjectId(null) // object/zoom selection are mutually exclusive
+      setInteractionMode('move')
+    }
+  }, [])
+
+  const toggleCameraView = useCallback(() => {
+    setCameraView((v) => (v === 'frame' ? 'live' : 'frame'))
+  }, [])
+
   // Finish arrow drawing: tighten bbox + switch to move mode
   const handleFinishArrow = useCallback(() => {
     if (selectedObjectId) {
@@ -196,6 +230,8 @@ export default function App() {
       if (e.key === ' ') {
         e.preventDefault()
         playback.togglePlayback()
+      } else if (e.key === 'v') {
+        toggleCameraView()
       } else if (e.key === 'm') {
         handleSetMode('move')
       } else if (e.key === 'd' && drawEnabled) {
@@ -209,6 +245,10 @@ export default function App() {
       } else if (e.key === 'Escape') {
         handleSetMode('move')
         setSelectedObjectId(null)
+        setSelectedZoomId(null)
+      } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedZoom) {
+        dispatch({ type: 'REMOVE_ZOOM', zoomId: selectedZoom.id })
+        setSelectedZoomId(null)
       } else if (e.key === 'Backspace' && interactionMode === 'draw' && selectedObject?.type === 'arrow') {
         // Remove last arrow point
         e.preventDefault()
@@ -234,10 +274,11 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [playback, interactionMode, selectedObject, drawEnabled, dispatch, undo, redo, handleSetMode, handleFinishArrow])
+  }, [playback, interactionMode, selectedObject, selectedZoom, drawEnabled, dispatch, undo, redo, handleSetMode, handleFinishArrow, toggleCameraView])
 
   const handleSelectObject = useCallback((id: string | null) => {
     setSelectedObjectId(id)
+    if (id) setSelectedZoomId(null) // object/zoom selection are mutually exclusive
     // Auto-switch mode based on selected object type
     if (id) {
       const obj = project.objects.find((o) => o.id === id)
@@ -285,6 +326,8 @@ export default function App() {
               e.target.value = ''
             }}
           />
+          <span className="w-px h-6 bg-gray-700" />
+          <AspectRatioSelector width={project.width} height={project.height} dispatch={dispatch} />
         </div>
         <div className="flex items-center gap-2">
           <AnnotationTools
@@ -292,6 +335,7 @@ export default function App() {
             onSetMode={handleSetMode}
             onCreateObject={handleCreateObject}
             onAddAsset={() => setShowImport(true)}
+            onCreateZoom={handleCreateZoom}
             drawEnabled={drawEnabled}
           />
           <span className="w-px h-6 bg-gray-700" />
@@ -318,15 +362,12 @@ export default function App() {
           >
             {playback.isPlaying ? 'Pause' : 'Play'}
           </button>
-          <button
-            onClick={toggleMute}
-            className={`px-2 py-1.5 text-sm rounded transition-colors cursor-pointer ${
-              isMuted ? 'bg-red-900/50 text-red-300 hover:bg-red-800/50' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
-            }`}
-            title={isMuted ? 'Unmute' : 'Mute'}
-          >
-            {isMuted ? 'Muted' : 'Sound'}
-          </button>
+          <VolumeControl
+            volume={volume}
+            isMuted={isMuted}
+            onVolume={setVolume}
+            onToggleMute={toggleMute}
+          />
           <span className="text-xs text-gray-400 tabular-nums min-w-16 text-right">
             {playback.globalTime.toFixed(1)}s / {playback.totalDuration.toFixed(1)}s
           </span>
@@ -351,10 +392,16 @@ export default function App() {
           interactionMode={interactionMode}
           dispatch={dispatch}
           onFinishArrow={handleFinishArrow}
+          zooms={project.zooms}
+          selectedZoomId={selectedZoomId}
+          onSelectZoom={handleSelectZoom}
+          cameraView={cameraView}
+          onToggleCameraView={toggleCameraView}
         />
 
         <PropertiesPanel
           object={selectedObject}
+          zoom={selectedZoom}
           dispatch={dispatch}
           globalTime={playback.globalTime}
           onSeek={playback.seek}
@@ -370,6 +417,9 @@ export default function App() {
         onSelectObject={handleSelectObject}
         onSeek={playback.seek}
         dispatch={dispatch}
+        zooms={project.zooms}
+        selectedZoomId={selectedZoomId}
+        onSelectZoom={handleSelectZoom}
       />
 
       {/* Modals */}

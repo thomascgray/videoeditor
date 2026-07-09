@@ -1,5 +1,7 @@
 # 13-camera-zoom
 
+> **Status: IMPLEMENTED** (2026-07-09) — see `TASKS/13-zoom.md` for the build log and `CLAUDE.md` → "Camera / zooms" for the architecture. All six phases shipped; export path wired. Open Questions were resolved with the recommended defaults.
+
 ## Overview
 
 Add **camera zooms** — a way to punch the "camera" in on a region of the canvas for a stretch of time, then pull back out, à la a screen-recording tool (Screen Studio etc.). The camera is applied as a **single global `ctx.translate/scale` transform in `renderFrame`**, in front of the existing object loop. Because object coordinates are already normalized 0–1, this composes over every object for free and — critically — works **identically in preview and export** because both share `renderFrame`.

@@ -2,6 +2,7 @@ import { useRef } from 'react'
 import type {
   TimelineObject, ProjectAction, ArrowData, AudioData, VideoData, TextData,
   AnimatableProperty, EasingKind, Transition, TransitionKind, SlideDirection, Keyframe,
+  CameraZoom,
 } from '../types'
 import {
   KF_EPS, effVal as kfEffVal, editPose, addKeyframeAt,
@@ -11,6 +12,7 @@ import { clamp01 } from '../lib/easing'
 
 type PropertiesPanelProps = {
   object: TimelineObject | null
+  zoom?: CameraZoom | null
   dispatch: React.Dispatch<ProjectAction>
   globalTime: number
   onSeek: (t: number) => void
@@ -35,7 +37,12 @@ const EASING_LABELS: Record<EasingKind, string> = {
 }
 const SELECT_CLS = 'bg-gray-800 text-white text-xs px-2 py-1 rounded border border-gray-700 focus:border-indigo-500 outline-none cursor-pointer'
 
-export default function PropertiesPanel({ object: obj, dispatch, globalTime, onSeek }: PropertiesPanelProps) {
+export default function PropertiesPanel({ object: obj, zoom, dispatch, globalTime, onSeek }: PropertiesPanelProps) {
+  // A selected zoom takes over the panel (mutually exclusive with object selection).
+  if (zoom) {
+    return <ZoomEditor zoom={zoom} dispatch={dispatch} globalTime={globalTime} onSeek={onSeek} />
+  }
+
   if (!obj) {
     return (
       <div className="w-64 bg-gray-900 border-l border-gray-700 p-4 overflow-y-auto text-sm">
@@ -432,6 +439,103 @@ export default function PropertiesPanel({ object: obj, dispatch, globalTime, onS
   )
 }
 
+// --- Camera zoom editor (spec 13) ---
+// Rendered in the panel slot when a zoom is selected instead of the object editor.
+function ZoomEditor({
+  zoom, dispatch, globalTime, onSeek,
+}: {
+  zoom: CameraZoom
+  dispatch: React.Dispatch<ProjectAction>
+  globalTime: number
+  onSeek: (t: number) => void
+}) {
+  const update = (updates: Partial<Omit<CameraZoom, 'id'>>) =>
+    dispatch({ type: 'UPDATE_ZOOM', zoomId: zoom.id, updates })
+
+  const envelope = zoom.transitionIn + zoom.hold + zoom.transitionOut
+  const end = zoom.startTime + envelope
+  const withinSpan = globalTime >= zoom.startTime && globalTime <= end
+
+  return (
+    <div className="w-64 bg-gray-900 border-l border-gray-700 p-4 overflow-y-auto text-sm">
+      {/* Header */}
+      <div className="mb-4 flex items-center gap-2 px-2 py-1.5 rounded text-white text-xs font-semibold bg-amber-600/80">
+        <span className="text-sm leading-none">⛶</span>
+        <span>Camera Zoom</span>
+      </div>
+      <p className="text-[10px] text-gray-500 mb-4 -mt-2">
+        Frame a region to punch into. Edit the framing rectangle on the canvas, or the numbers below.
+        Toggle <span className="text-gray-300">Live</span> on the canvas to preview the real push-in.
+      </p>
+
+      {/* Focus target */}
+      <Section title="Focus">
+        <div className="grid grid-cols-2 gap-2">
+          <Field label="X">
+            <NumberInput value={zoom.x} min={0} max={1} step={0.01} onChange={(v) => update({ x: clamp01(v) })} />
+          </Field>
+          <Field label="Y">
+            <NumberInput value={zoom.y} min={0} max={1} step={0.01} onChange={(v) => update({ y: clamp01(v) })} />
+          </Field>
+        </div>
+        <Field label="Zoom (×)">
+          <NumberInput value={zoom.scale} min={1} step={0.1} onChange={(v) => update({ scale: Math.max(1, v) })} />
+        </Field>
+      </Section>
+
+      {/* Timing envelope */}
+      <Section title="Timing">
+        <Field label="Start (s)">
+          <NumberInput value={zoom.startTime} min={0} step={0.1} onChange={(v) => update({ startTime: Math.max(0, v) })} />
+        </Field>
+        <Field label="Ease in (s)">
+          <NumberInput value={zoom.transitionIn} min={0} step={0.1} onChange={(v) => update({ transitionIn: Math.max(0, v) })} />
+        </Field>
+        <Field label="Hold (s)">
+          <NumberInput value={zoom.hold} min={0} step={0.1} onChange={(v) => update({ hold: Math.max(0, v) })} />
+        </Field>
+        <Field label="Ease out (s)">
+          <NumberInput value={zoom.transitionOut} min={0} step={0.1} onChange={(v) => update({ transitionOut: Math.max(0, v) })} />
+        </Field>
+        <div>
+          <label className="text-gray-400 text-xs block mb-1">Motion</label>
+          <select
+            value={zoom.easing}
+            onChange={(e) => update({ easing: e.target.value as EasingKind })}
+            className="w-full bg-gray-800 text-white text-[11px] px-1 py-1 rounded border border-gray-700 focus:border-indigo-500 outline-none cursor-pointer"
+          >
+            {EASINGS.map((k) => <option key={k} value={k}>{EASING_LABELS[k]}</option>)}
+          </select>
+          <p className="text-[10px] text-gray-500 mt-1">Shapes both the push-in and the pull-out ramps.</p>
+        </div>
+        <div className="flex items-center justify-between text-[10px] text-gray-500 tabular-nums pt-1">
+          <span>Span: {zoom.startTime.toFixed(1)}s → {end.toFixed(1)}s</span>
+          <span>({envelope.toFixed(1)}s)</span>
+        </div>
+        <button
+          onClick={() => onSeek(zoom.startTime)}
+          className={`w-full px-2 py-1 text-[11px] rounded cursor-pointer transition-colors ${
+            withinSpan ? 'bg-gray-800 text-gray-400 hover:bg-gray-700' : 'bg-indigo-900/50 text-indigo-300 hover:bg-indigo-800/50'
+          }`}
+          title="Move the playhead to this zoom's start"
+        >
+          {withinSpan ? 'Playhead is on this zoom' : 'Jump to zoom start'}
+        </button>
+      </Section>
+
+      {/* Actions */}
+      <div className="mt-4">
+        <button
+          onClick={() => dispatch({ type: 'REMOVE_ZOOM', zoomId: zoom.id })}
+          className="w-full px-3 py-1.5 text-xs bg-red-900/50 hover:bg-red-800/50 text-red-300 rounded transition-colors cursor-pointer"
+        >
+          Delete zoom
+        </button>
+      </div>
+    </div>
+  )
+}
+
 // --- Helper components ---
 
 function TransitionSection({
@@ -543,14 +647,14 @@ function TypeOnBar({
   return (
     <div>
       <div className="flex items-center justify-between mb-1">
-        <label className="text-gray-400 text-xs">Type-on</label>
+        <label className="text-gray-400 text-xs">Reveal</label>
         <span className="text-[10px] text-gray-500 tabular-nums">
           {animateIn <= 0 ? 'instant' : `${animateIn.toFixed(1)}s of ${duration.toFixed(1)}s`}
         </span>
       </div>
       <div
         className="relative h-4 w-full rounded bg-gray-700 cursor-ew-resize select-none touch-none"
-        title="Drag to set how long the object takes to type / draw on — fully left = instant"
+        title="Drag to set how long the object takes to reveal (type / draw on / grow in) — fully left = instant"
         onPointerDown={(e) => {
           e.preventDefault()
           dragging.current = true
