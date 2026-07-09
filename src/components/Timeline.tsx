@@ -1,5 +1,6 @@
 import { useRef, useCallback, useState, useEffect } from 'react'
 import type { TimelineObject, ProjectAction, AudioData, VideoData } from '../types'
+import { keyframeColor } from '../lib/keyframes'
 
 type TimelineProps = {
   objects: TimelineObject[]
@@ -42,7 +43,7 @@ type DragState =
   | { kind: 'move'; objectId: string; startMouseX: number; startMouseY: number; originalStartTime: number; originalLane: number; clampMinLane: number; clampMaxLane: number }
   | { kind: 'resize-left'; objectId: string; startMouseX: number; originalStartTime: number; originalDuration: number }
   | { kind: 'resize-right'; objectId: string; startMouseX: number; originalDuration: number }
-  | { kind: 'resize-animate-in'; objectId: string; startMouseX: number; originalAnimateIn: number; originalDuration: number }
+  | { kind: 'move-keyframe'; objectId: string; kfIndex: number; startMouseX: number; originalTime: number; minTime: number; maxTime: number }
   | { kind: 'playhead'; startMouseX: number; startTime: number }
 
 export default function Timeline({
@@ -190,20 +191,23 @@ export default function Timeline({
           objectId: dragState.objectId,
           updates: { duration: newDuration, ...(clampedAnimateIn !== undefined && { animateIn: clampedAnimateIn }) },
         })
-      } else if (dragState.kind === 'resize-animate-in') {
-        const newAnimateIn = Math.round(Math.max(0.1, dragState.originalAnimateIn + dt) * 10) / 10
-        // If animateIn exceeds duration, expand duration to fit
-        const newDuration = Math.round(Math.max(dragState.originalDuration, newAnimateIn) * 10) / 10
-        dispatch({
-          type: 'UPDATE_OBJECT',
-          objectId: dragState.objectId,
-          updates: { animateIn: newAnimateIn, duration: newDuration },
-        })
+      } else if (dragState.kind === 'move-keyframe') {
+        // Retime a single keyframe; clamped between its neighbors so the order never flips.
+        const raw = dragState.originalTime + dt
+        const t = Math.round(Math.max(dragState.minTime, Math.min(dragState.maxTime, raw)) * 100) / 100
+        const obj = objects.find((o) => o.id === dragState.objectId)
+        if (obj?.keyframes) {
+          dispatch({
+            type: 'UPDATE_OBJECT_TRANSIENT',
+            objectId: dragState.objectId,
+            updates: { keyframes: obj.keyframes.map((k, j) => (j === dragState.kfIndex ? { ...k, time: t } : k)) },
+          })
+        }
       }
     }
 
     const handleMouseUp = () => {
-      if (dragState.kind === 'move') {
+      if (dragState.kind === 'move' || dragState.kind === 'move-keyframe') {
         dispatch({ type: 'COMMIT_TRANSIENT' })
       }
       setDragState(null)
@@ -375,7 +379,7 @@ export default function Timeline({
                   >
                     {/* Left resize handle */}
                     <div
-                      className="absolute left-0 top-0 w-1.5 h-full cursor-col-resize z-10 hover:bg-white/30"
+                      className="absolute left-0 top-0 w-1.5 h-full cursor-col-resize z-40 hover:bg-white/30"
                       onMouseDown={(e) => {
                         e.stopPropagation()
                         onSelectObject(obj.id)
@@ -413,6 +417,19 @@ export default function Timeline({
                         })
                       }}
                     >
+                      {/* Enter/exit transition ramps (behind the label) */}
+                      {obj.enter && obj.enter.kind !== 'none' && (
+                        <div
+                          className="absolute top-0 left-0 h-full pointer-events-none"
+                          style={{ width: Math.min(timeToX(obj.enter.duration), width), background: 'linear-gradient(90deg, rgba(255,255,255,0.35), transparent)' }}
+                        />
+                      )}
+                      {obj.exit && obj.exit.kind !== 'none' && (
+                        <div
+                          className="absolute top-0 right-0 h-full pointer-events-none"
+                          style={{ width: Math.min(timeToX(obj.exit.duration), width), background: 'linear-gradient(270deg, rgba(255,255,255,0.35), transparent)' }}
+                        />
+                      )}
                       {/* Waveform background for audio clips */}
                       {obj.type === 'audio' && (obj.data as AudioData).waveform && (
                         <div className="absolute inset-0 flex items-end pointer-events-none opacity-30">
@@ -432,61 +449,68 @@ export default function Timeline({
                         <span className="opacity-70">[{formatTime(obj.startTime)} - {formatTime(obj.startTime + obj.duration)}]</span>
                       </span>
 
-                      {/* AnimateIn sub-bar: any object with a draw-on / type-on animation
-                          (arrows, freehand, text, shapes — everything except media). */}
+                      {/* AnimateIn sub-bar: display-only stripe showing the type-on / draw-on
+                          region. Its length is edited from the Properties panel (Type-on bar),
+                          not by dragging here. */}
                       {obj.animateIn > 0 && obj.type !== 'photo' && obj.type !== 'audio' && obj.type !== 'video' ? (() => {
                         // Cap sub-bar so it never covers the parent's resize handles (6px reserved each side)
                         const pct = (obj.animateIn / obj.duration) * 100
                         const maxPx = width - 6
                         return (
                           <div
-                            className="absolute top-0 left-0 h-full pointer-events-none"
+                            className="absolute top-0 left-0 h-full pointer-events-none rounded-sm"
                             style={{
                               width: maxPx > 0 ? `min(${pct}%, ${maxPx}px)` : `${pct}%`,
+                              background: 'repeating-linear-gradient(90deg, rgba(255,255,255,0.15) 0px, rgba(255,255,255,0.15) 3px, transparent 3px, transparent 6px)',
                             }}
-                          >
-                            <div
-                              className="absolute inset-0 rounded-sm"
-                              style={{
-                                background: 'repeating-linear-gradient(90deg, rgba(255,255,255,0.15) 0px, rgba(255,255,255,0.15) 3px, transparent 3px, transparent 6px)',
-                              }}
-                            />
-                            {/* Drag handle for animateIn right edge */}
-                            {(() => {
-                              const isActive = dragState?.kind === 'resize-animate-in' && dragState.objectId === obj.id
-                              return (
-                                <div
-                                  className="absolute right-0 top-0 w-2 h-full cursor-col-resize z-10 pointer-events-auto transition-colors"
-                                  style={{
-                                    background: isActive ? 'rgba(251,191,36,0.9)' : 'rgba(251,191,36,0.35)',
-                                  }}
-                                  onMouseEnter={(e) => { if (!dragState) (e.currentTarget.style.background = 'rgba(251,191,36,0.7)') }}
-                                  onMouseLeave={(e) => { if (!isActive) (e.currentTarget.style.background = 'rgba(251,191,36,0.35)') }}
-                                  onMouseDown={(e) => {
-                                    e.stopPropagation()
-                                    onSelectObject(obj.id)
-                                    setDragState({
-                                      kind: 'resize-animate-in',
-                                      objectId: obj.id,
-                                      startMouseX: e.clientX,
-                                      originalAnimateIn: obj.animateIn,
-                                      originalDuration: obj.duration,
-                                    })
-                                  }}
-                                />
-                              )
-                            })()}
-                          </div>
+                          />
                         )
                       })() : null}
                     </div>
+
+                    {/* Keyframe markers (diamonds on top of the bar), colored to match the
+                        panel pips. Drag one horizontally to retime that keyframe. */}
+                    {(obj.keyframes ?? []).map((k, i) => {
+                      const kfs = obj.keyframes!
+                      // Clamp between neighbors (with a small gap) so dragging can't reorder them.
+                      let minTime = i > 0 ? kfs[i - 1].time + 0.05 : 0
+                      let maxTime = i < kfs.length - 1 ? kfs[i + 1].time - 0.05 : obj.duration
+                      if (minTime > maxTime) { const m = (minTime + maxTime) / 2; minTime = m; maxTime = m }
+                      const isActive = dragState?.kind === 'move-keyframe' && dragState.objectId === obj.id && dragState.kfIndex === i
+                      return (
+                        <div
+                          key={i}
+                          className="absolute top-1/2 w-3 h-3 border border-black/60 z-20 cursor-ew-resize pointer-events-auto"
+                          style={{
+                            left: timeToX(k.time),
+                            background: keyframeColor(i),
+                            transform: 'translate(-50%, -50%) rotate(45deg)',
+                            boxShadow: isActive ? '0 0 0 2px #fff' : 'none',
+                          }}
+                          title={`Keyframe ${i + 1} @ ${k.time.toFixed(2)}s — drag to retime`}
+                          onMouseDown={(e) => {
+                            e.stopPropagation()
+                            onSelectObject(obj.id)
+                            setDragState({
+                              kind: 'move-keyframe',
+                              objectId: obj.id,
+                              kfIndex: i,
+                              startMouseX: e.clientX,
+                              originalTime: k.time,
+                              minTime,
+                              maxTime,
+                            })
+                          }}
+                        />
+                      )
+                    })}
 
                     {/* Right resize handle */}
                     {(() => {
                       const isActive = dragState?.kind === 'resize-right' && dragState.objectId === obj.id
                       return (
                     <div
-                      className="absolute right-0 top-0 w-2 h-full cursor-col-resize z-10 transition-colors"
+                      className="absolute right-0 top-0 w-2 h-full cursor-col-resize z-40 transition-colors"
                       style={{
                         background: isActive ? 'rgba(96,165,250,0.9)' : 'rgba(96,165,250,0.25)',
                       }}

@@ -137,11 +137,15 @@ export default function App() {
     }
   }, [dispatch])
 
-  // Central helper: assigns each object to a new lane above all existing objects, then dispatches
+  // Central helper: assigns each object to a new lane above all existing objects,
+  // dispatches, and selects the newly-added object (the last one when adding several)
+  // so freshly added assets and annotations become the active selection consistently.
   const addObjects = useCallback((objects: TimelineObject[]) => {
     const maxLane = project.objects.reduce((max, o) => Math.max(max, o.lane), -1)
     const withLanes = objects.map((obj, i) => ({ ...obj, lane: maxLane + 1 + i }))
     dispatch({ type: 'ADD_OBJECTS', objects: withLanes })
+    const last = withLanes[withLanes.length - 1]
+    if (last) setSelectedObjectId(last.id)
     return withLanes
   }, [project.objects, dispatch])
 
@@ -166,8 +170,7 @@ export default function App() {
       height: type === 'text' ? 0.2 : 1,
     })
 
-    const [added] = addObjects([obj])
-    setSelectedObjectId(added.id)
+    addObjects([obj])
 
     // Auto-enter draw mode for arrow/freehand, move mode for others
     if (type === 'arrow' || type === 'freehand') {
@@ -353,6 +356,8 @@ export default function App() {
         <PropertiesPanel
           object={selectedObject}
           dispatch={dispatch}
+          globalTime={playback.globalTime}
+          onSeek={playback.seek}
         />
       </div>
 

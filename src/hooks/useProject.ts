@@ -104,6 +104,10 @@ function applyAction(project: Project, action: ProjectAction): Project {
         id: crypto.randomUUID(),
         name: original.name + ' (copy)',
         startTime: original.startTime + original.duration,
+        // Deep-clone nested structures so the copy is fully independent (R10) — a shallow
+        // spread would share keyframe/data arrays by reference between original and copy.
+        data: structuredClone(original.data),
+        keyframes: original.keyframes ? structuredClone(original.keyframes) : undefined,
       }
       const objects = [...project.objects]
       objects.splice(idx + 1, 0, dupe)

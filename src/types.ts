@@ -19,6 +19,9 @@ export type TimelineObject = {
 
   // Animation
   animateIn: number       // seconds for draw-on animation (0 = instant)
+  keyframes?: Keyframe[]  // optional whole-pose animation waypoints; created only via the button
+  enter?: Transition      // entrance animation (fade/slide/pop) played as the object appears
+  exit?: Transition       // exit animation played as the object disappears
 
   // Visual style
   style: ObjectStyle
@@ -34,6 +37,41 @@ export type ObjectStyle = {
   fontSize?: number
   fontFamily?: string
   fontWeight?: string
+}
+
+// === Animation / Keyframes ===
+
+export type EasingKind =
+  | 'linear'
+  | 'easeInQuad'  | 'easeOutQuad'  | 'easeInOutQuad'
+  | 'easeInCubic' | 'easeOutCubic' | 'easeInOutCubic'
+  | 'easeOutBack'
+  | 'spring'
+
+// Object properties that can be keyframed. `opacity` maps to style.opacity; the rest are top-level.
+export type AnimatableProperty = 'x' | 'y' | 'width' | 'height' | 'rotation' | 'opacity'
+
+// A full pose snapshot — every keyframe captures all of these; anything that changed tweens.
+export type KeyframePose = Record<AnimatableProperty, number>
+
+export type Keyframe = {
+  time: number         // clip-relative seconds (relative to startTime) when this pose is reached
+  pose: KeyframePose   // full snapshot of the object's pose at this keyframe
+  easing: EasingKind   // curve for the segment ARRIVING at this keyframe (from the previous one)
+}
+
+// === Enter / Exit transitions ===
+// Menu-driven entrance/exit animations, distinct from keyframes: they animate the object
+// as it appears (near startTime) or disappears (near endTime), and do NOT create keyframes.
+
+export type TransitionKind = 'none' | 'fade' | 'slide' | 'pop'
+export type SlideDirection = 'left' | 'right' | 'top' | 'bottom'
+
+export type Transition = {
+  kind: TransitionKind
+  duration: number          // seconds
+  direction?: SlideDirection // slide only
+  easing?: EasingKind        // optional; a kind-specific default is used when omitted
 }
 
 export type PhotoData = {
