@@ -1,5 +1,6 @@
 import type { Project, PhotoData, AudioData, VideoData } from '../types'
 import { renderFrame, loadImage } from './renderer'
+import { resolveCamera } from './camera'
 import { getAssetUrl, getAssetBlob } from './assetStore'
 import { createVideoFrameSource, type VideoFrameSource } from './videoDecoder'
 import type { ExportWorkerRequest, ExportWorkerResponse, RenderedAudio } from './exportWorkerTypes'
@@ -348,8 +349,11 @@ async function exportWithWebCodecs(
         }
       }
 
-      // Composite all objects onto canvas
-      renderFrame(ctx, objects, globalTime, { width, height }, imageCache)
+      // Composite all objects onto canvas (with the camera transform, spec 13 — export always
+      // renders the real camera so the MP4 matches Live-view preview).
+      renderFrame(ctx, objects, globalTime, { width, height }, imageCache, {
+        camera: resolveCamera(project.zooms, globalTime),
+      })
 
       // Encode canvas as video frame (no real-time delay!)
       const frame = new VideoFrame(canvas, {
@@ -753,7 +757,9 @@ async function exportWithMediaRecorder(
       }
     }
 
-    renderFrame(ctx, objects, globalTime, { width, height }, imageCache)
+    renderFrame(ctx, objects, globalTime, { width, height }, imageCache, {
+      camera: resolveCamera(project.zooms, globalTime),
+    })
 
     // @ts-expect-error - requestFrame exists on CanvasCaptureMediaStreamTrack
     if (videoTrack.requestFrame) videoTrack.requestFrame()

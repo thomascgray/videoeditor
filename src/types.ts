@@ -110,6 +110,35 @@ export type VideoData = {
   originalDuration: number  // seconds — the source file's actual duration
 }
 
+// === Camera (spec 13) ===
+
+// The resolved camera pose at an instant (what renderFrame consumes).
+export type CameraState = {
+  x: number      // normalized 0–1 focal point, held at canvas center
+  y: number      // normalized 0–1
+  scale: number  // >= 1 (1 = full frame, 2 = 2x punch-in)
+}
+
+// One authored "zoom" — a punch-in envelope. resolveCamera compiles a list of these
+// into a CameraState at each global time. Reuses spec-12 EasingKind.
+export type CameraZoom = {
+  id: string
+  x: number              // focal point (normalized 0–1)
+  y: number
+  scale: number          // >= 1, the "amount"
+  startTime: number      // global seconds — when the ease-in begins
+  transitionIn: number   // seconds to ease from the CURRENT camera pose into this target
+  hold: number           // seconds held fully zoomed
+  transitionOut: number  // seconds to ease back to full frame IF no next zoom takes over first
+  easing: EasingKind     // spec-12 curve applied to both in and out ramps
+}
+// Chaining (A->B) is expressed by TIMING: if zoom B's startTime lands while zoom A is still
+// active (holding, or mid ease-out), B's transitionIn eases from A's current pose straight to B's
+// target — the camera never returns to full frame between them. Leave a gap and the camera pulls
+// back to full frame (via A's transitionOut) before B begins.
+
+export const IDENTITY_CAMERA: CameraState = { x: 0.5, y: 0.5, scale: 1 }
+
 // === Assets ===
 
 export type AssetType = 'image' | 'audio' | 'video'
@@ -133,6 +162,7 @@ export type Project = {
   height: number
   objects: TimelineObject[]
   assets: AssetMeta[]
+  zooms?: CameraZoom[]      // camera punch-ins (spec 13); optional/additive for back-compat
 }
 
 // === Interaction Modes ===
@@ -152,6 +182,10 @@ export type ProjectAction =
   | { type: 'DUPLICATE_OBJECT'; objectId: string }
   | { type: 'REMOVE_LANE'; lane: number }
   | { type: 'ADD_ASSETS'; assets: AssetMeta[] }
+  | { type: 'ADD_ZOOM'; zoom: CameraZoom }
+  | { type: 'UPDATE_ZOOM'; zoomId: string; updates: Partial<Omit<CameraZoom, 'id'>> }
+  | { type: 'UPDATE_ZOOM_TRANSIENT'; zoomId: string; updates: Partial<Omit<CameraZoom, 'id'>> }
+  | { type: 'REMOVE_ZOOM'; zoomId: string }
   | { type: 'UNDO' }
   | { type: 'REDO' }
 
@@ -166,6 +200,21 @@ export function createDefaultProject(): Project {
     height: 1080,
     objects: [],
     assets: [],
+  }
+}
+
+// Default parameters for a freshly-created zoom (spec 13 Open Q1 recommendations).
+export function createCameraZoom(options?: Partial<Omit<CameraZoom, 'id'>>): CameraZoom {
+  return {
+    id: crypto.randomUUID(),
+    x: options?.x ?? 0.5,
+    y: options?.y ?? 0.5,
+    scale: options?.scale ?? 2,
+    startTime: options?.startTime ?? 0,
+    transitionIn: options?.transitionIn ?? 0.6,
+    hold: options?.hold ?? 2,
+    transitionOut: options?.transitionOut ?? 0.6,
+    easing: options?.easing ?? 'easeInOutCubic',
   }
 }
 

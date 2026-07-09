@@ -1,4 +1,4 @@
-import type { TimelineObject, ArrowData, TextData, FreehandData, PhotoData, VideoData, ObjectStyle } from '../types'
+import type { TimelineObject, ArrowData, TextData, FreehandData, PhotoData, VideoData, ObjectStyle, CameraState } from '../types'
 import {
   drawArrow,
   drawText,
@@ -7,10 +7,12 @@ import {
   drawFreehand,
 } from './annotations'
 import { resolveRenderPose } from './keyframes'
+import { isIdentityCamera } from './camera'
 
 export type EditorOptions = {
   editorMode?: boolean
   activeDrawingObjectId?: string | null
+  camera?: CameraState   // spec 13: applied as a global transform around the object loop
 }
 
 const GHOST_ALPHA = 0.25
@@ -30,8 +32,9 @@ export function renderFrame(
   const { width: w, height: h } = options
   const editorMode = editorOptions?.editorMode ?? false
   const activeDrawingObjectId = editorOptions?.activeDrawingObjectId ?? null
+  const camera = editorOptions?.camera
 
-  // Black background
+  // Black background (drawn un-zoomed so the letterbox stays black under any camera)
   ctx.fillStyle = '#000000'
   ctx.fillRect(0, 0, w, h)
 
@@ -39,6 +42,16 @@ export function renderFrame(
   const visible = objects
     .filter((obj) => globalTime >= obj.startTime && globalTime < obj.startTime + obj.duration)
     .sort((a, b) => a.lane - b.lane)
+
+  // Camera transform (spec 13): a single global translate/scale wrapping the object loop.
+  // Composes over every object for free since object coords are normalized 0–1. Absent or
+  // identity camera => no-op => pixel-identical to pre-spec-13 output (R3/R11).
+  ctx.save()
+  if (camera != null && !isIdentityCamera(camera)) {
+    ctx.translate(w / 2, h / 2)
+    ctx.scale(camera.scale, camera.scale)
+    ctx.translate(-camera.x * w, -camera.y * h)
+  }
 
   for (const rawObj of visible) {
     const elapsed = globalTime - rawObj.startTime
@@ -67,6 +80,8 @@ export function renderFrame(
 
     drawObject(ctx, obj, progress, w, h, imageCache)
   }
+
+  ctx.restore()
 }
 
 function drawObject(
