@@ -16,6 +16,8 @@ type TimelineProps = {
   zooms?: CameraZoom[]
   selectedZoomId: string | null
   onSelectZoom: (id: string | null) => void
+  // Collapse the timeline to a slim bar (spec 16 B3). App owns the collapsed state + height.
+  onCollapse?: () => void
 }
 
 const LANE_HEIGHT = 32
@@ -94,6 +96,7 @@ export default function Timeline({
   zooms,
   selectedZoomId,
   onSelectZoom,
+  onCollapse,
 }: TimelineProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [pixelsPerSecond, setPixelsPerSecond] = useState(DEFAULT_PIXELS_PER_SECOND)
@@ -127,28 +130,47 @@ export default function Timeline({
     (x: number) => Math.max(0, x / pixelsPerSecond),
     [pixelsPerSecond],
   )
+  // Map a viewport clientX to a timeline time. The lane gutter now lives INSIDE the horizontal
+  // scroll container (frozen via sticky-left, spec 16 A3), so content x=0 (time 0) sits
+  // GUTTER_WIDTH past the container's left edge — subtract it (and add scrollLeft) before converting.
+  const clientXToTime = useCallback((clientX: number) => {
+    const el = containerRef.current
+    if (!el) return 0
+    const x = clientX - el.getBoundingClientRect().left + el.scrollLeft - GUTTER_WIDTH
+    return xToTime(x)
+  }, [xToTime])
 
-  // Zoom with mouse wheel
-  const handleWheel = useCallback((e: React.WheelEvent) => {
-    if (e.ctrlKey || e.metaKey) {
+  // Time-zoom with Ctrl/Cmd + wheel (spec 16 A2). MUST be a native, non-passive listener: React's
+  // onWheel is passive, so its preventDefault is ignored and the browser page-zooms instead (the
+  // bug this replaces). Plain wheel falls through to the container's native horizontal + vertical
+  // lane scroll. A ref keeps the once-attached listener reading the live pixelsPerSecond.
+  const pixelsPerSecondRef = useRef(pixelsPerSecond)
+  pixelsPerSecondRef.current = pixelsPerSecond
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const onWheel = (e: WheelEvent) => {
+      if (!(e.ctrlKey || e.metaKey)) return // let plain wheel scroll the lanes natively
       e.preventDefault()
-      setPixelsPerSecond((prev) => {
-        const factor = e.deltaY > 0 ? 0.9 : 1.1
-        return Math.min(MAX_PIXELS_PER_SECOND, Math.max(MIN_PIXELS_PER_SECOND, prev * factor))
-      })
+      const prev = pixelsPerSecondRef.current
+      const factor = e.deltaY > 0 ? 0.9 : 1.1
+      const next = Math.min(MAX_PIXELS_PER_SECOND, Math.max(MIN_PIXELS_PER_SECOND, prev * factor))
+      if (next === prev) return
+      // Keep the time under the cursor fixed: remember its content-x, restore scrollLeft after the
+      // timeline width re-renders (browser clamps scrollLeft to valid range for us).
+      const cursorX = e.clientX - el.getBoundingClientRect().left
+      const t = (cursorX + el.scrollLeft - GUTTER_WIDTH) / prev
+      setPixelsPerSecond(next)
+      requestAnimationFrame(() => { el.scrollLeft = t * next - cursorX + GUTTER_WIDTH })
     }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onWheel)
   }, [])
 
   // Click on ruler or empty area to seek
   const handleRulerClick = useCallback(
-    (e: React.MouseEvent) => {
-      const rect = containerRef.current?.getBoundingClientRect()
-      if (!rect) return
-      const scrollLeft = containerRef.current?.scrollLeft ?? 0
-      const x = e.clientX - rect.left + scrollLeft
-      onSeek(xToTime(x))
-    },
-    [xToTime, onSeek],
+    (e: React.MouseEvent) => { onSeek(clientXToTime(e.clientX)) },
+    [clientXToTime, onSeek],
   )
 
   // Lane management
@@ -343,82 +365,90 @@ export default function Timeline({
   }
 
   return (
-    <div className="bg-gray-900 border-t border-gray-700 select-none" style={{ minHeight: 120 }}>
-      <div className="flex">
-        {/* Lane gutter (fixed, doesn't scroll) */}
-        <div className="flex-shrink-0 flex flex-col" style={{ width: GUTTER_WIDTH }}>
-          {/* Spacer for ruler */}
-          <div className="bg-gray-800 border-b border-gray-700" style={{ height: RULER_HEIGHT }} />
+    <div className="h-full bg-gray-900 border-t border-gray-700 select-none flex flex-col">
+      {/* Single scroll container drives BOTH axes (spec 16 A): horizontal time-scroll + vertical
+          lane-scroll. Ruler + Camera track are pinned via sticky-top (frozen header) and the lane
+          gutter via sticky-left (frozen column), so adding lanes scrolls instead of squishing the render. */}
+      <div
+        ref={containerRef}
+        className="flex-1 min-h-0 overflow-auto"
+      >
+        <div className="flex" style={{ width: GUTTER_WIDTH + timelineWidth }}>
+          {/* Lane gutter — frozen to the left (sticky). Its top two cells (collapse + Camera label)
+              are also sticky-top so they stay aligned with the pinned ruler/Camera track. z-[70] keeps
+              it above every scrolling bar child (bars use up to z-50) so nothing bleeds over it. */}
+          <div className="sticky left-0 z-[70] flex-shrink-0 flex flex-col bg-gray-900" style={{ width: GUTTER_WIDTH }}>
+            {/* Collapse chevron — pinned (sticky top) with the ruler (spec 16 B3) */}
+            <button
+              onClick={onCollapse}
+              className="sticky top-0 z-10 w-full flex items-center justify-center bg-gray-800 border-b border-r border-gray-700 text-gray-500 hover:text-white transition-colors cursor-pointer"
+              style={{ height: RULER_HEIGHT }}
+              title="Collapse timeline"
+            >
+              <span className="text-[10px] leading-none">▾</span>
+            </button>
 
-          {/* Camera track label (pinned, spec 13) */}
-          <div
-            className="w-full flex items-center justify-center border-b border-gray-700 text-amber-500"
-            style={{ height: CAMERA_TRACK_HEIGHT }}
-            title="Camera zooms"
-          >
-            <span className="text-sm leading-none">⛶</span>
-          </div>
-
-          {/* Add lane above CTA (dedicated blank lane row) */}
-          <button
-            onClick={handleAddLaneAbove}
-            className="w-full flex items-center justify-center text-gray-500 hover:text-blue-400 hover:bg-blue-500/10 transition-colors cursor-pointer"
-            style={{ height: LANE_HEIGHT }}
-            title="Add lane above"
-          >
-            <span className="text-sm font-bold leading-none">+</span>
-          </button>
-
-          {/* Lane controls */}
-          <div className="relative" style={{ height: trackHeight }}>
-            {/* Per-lane remove buttons */}
-            {lanes.map((lane) => {
-              const y = laneToY(lane)
-              const hasObjects = objects.some((o) => o.lane === lane)
-              return (
-                <button
-                  key={lane}
-                  onClick={() => handleRemoveLane(lane)}
-                  disabled={laneCount <= 1}
-                  className="absolute left-0 w-full flex items-center justify-center text-gray-600 hover:text-red-400 hover:bg-red-500/10 disabled:opacity-0 disabled:pointer-events-none transition-colors cursor-pointer"
-                  style={{ top: y, height: LANE_HEIGHT }}
-                  title={hasObjects ? 'Remove lane (objects move up)' : 'Remove empty lane'}
-                >
-                  <span className="text-sm leading-none">&times;</span>
-                </button>
-              )
-            })}
-          </div>
-
-          {/* Add lane below CTA (dedicated blank lane row) */}
-          <button
-            onClick={handleAddLaneBelow}
-            className="w-full flex items-center justify-center text-gray-500 hover:text-blue-400 hover:bg-blue-500/10 transition-colors cursor-pointer"
-            style={{ height: LANE_HEIGHT }}
-            title="Add lane below"
-          >
-            <span className="text-sm font-bold leading-none">+</span>
-          </button>
-        </div>
-
-        {/* Scrollable timeline area */}
-        <div
-          ref={containerRef}
-          className="overflow-x-auto overflow-y-hidden flex-1"
-          onWheel={handleWheel}
-        >
-          <div style={{ width: timelineWidth, position: 'relative' }}>
-            {/* Ruler */}
+            {/* Camera track label — pinned (sticky) below the ruler (spec 13) */}
             <div
-              className="sticky top-0 bg-gray-800 border-b border-gray-700 cursor-pointer"
+              className="sticky z-10 w-full flex items-center justify-center border-b border-r border-gray-700 text-amber-500 bg-gray-900"
+              style={{ height: CAMERA_TRACK_HEIGHT, top: RULER_HEIGHT }}
+              title="Camera zooms"
+            >
+              <span className="text-sm leading-none">⛶</span>
+            </div>
+
+            {/* Add lane above CTA (dedicated blank lane row) */}
+            <button
+              onClick={handleAddLaneAbove}
+              className="w-full flex items-center justify-center border-r border-gray-800 text-gray-500 hover:text-blue-400 hover:bg-blue-500/10 transition-colors cursor-pointer"
+              style={{ height: LANE_HEIGHT }}
+              title="Add lane above"
+            >
+              <span className="text-sm font-bold leading-none">+</span>
+            </button>
+
+            {/* Lane controls */}
+            <div className="relative border-r border-gray-800" style={{ height: trackHeight }}>
+              {/* Per-lane remove buttons */}
+              {lanes.map((lane) => {
+                const y = laneToY(lane)
+                const hasObjects = objects.some((o) => o.lane === lane)
+                return (
+                  <button
+                    key={lane}
+                    onClick={() => handleRemoveLane(lane)}
+                    disabled={laneCount <= 1}
+                    className="absolute left-0 w-full flex items-center justify-center text-gray-600 hover:text-red-400 hover:bg-red-500/10 disabled:opacity-0 disabled:pointer-events-none transition-colors cursor-pointer"
+                    style={{ top: y, height: LANE_HEIGHT }}
+                    title={hasObjects ? 'Remove lane (objects move up)' : 'Remove empty lane'}
+                  >
+                    <span className="text-sm leading-none">&times;</span>
+                  </button>
+                )
+              })}
+            </div>
+
+            {/* Add lane below CTA (dedicated blank lane row) */}
+            <button
+              onClick={handleAddLaneBelow}
+              className="w-full flex items-center justify-center border-r border-gray-800 text-gray-500 hover:text-blue-400 hover:bg-blue-500/10 transition-colors cursor-pointer"
+              style={{ height: LANE_HEIGHT }}
+              title="Add lane below"
+            >
+              <span className="text-sm font-bold leading-none">+</span>
+            </button>
+          </div>
+
+          {/* Content column: ruler + Camera track + lanes. Scrolls (both axes) under the frozen gutter. */}
+          <div style={{ width: timelineWidth, position: 'relative' }}>
+            {/* Ruler (pinned top) — z-[60] sits above scrolling bar children (≤ z-50) so lanes
+                scrolling underneath are hidden by the opaque ruler. */}
+            <div
+              className="sticky top-0 z-[60] bg-gray-800 border-b border-gray-700 cursor-pointer"
               style={{ height: RULER_HEIGHT }}
               onMouseDown={(e) => {
                 handleRulerClick(e)
-                const rect = containerRef.current?.getBoundingClientRect()
-                if (!rect) return
-                const scrollLeft = containerRef.current?.scrollLeft ?? 0
-                const x = e.clientX - rect.left + scrollLeft
-                setDragState({ kind: 'playhead', startMouseX: e.clientX, startTime: xToTime(x) })
+                setDragState({ kind: 'playhead', startMouseX: e.clientX, startTime: clientXToTime(e.clientX) })
               }}
             >
               {ticks.map((tick) => (
@@ -440,19 +470,17 @@ export default function Timeline({
               ))}
             </div>
 
-            {/* Camera track (pinned, spec 13): zoom envelope bars — not an object lane. */}
+            {/* Camera track (pinned top, spec 13): zoom envelope bars — not an object lane. Opaque
+                background (amber wash over gray-900) so lanes scrolling under it are hidden; z-[60]
+                like the ruler. Zoom-bar children (z-50) are confined inside this stacking context. */}
             <div
-              className="relative border-b border-gray-800"
-              style={{ height: CAMERA_TRACK_HEIGHT, background: 'rgba(245,158,11,0.04)' }}
+              className="sticky z-[60] border-b border-gray-800"
+              style={{ height: CAMERA_TRACK_HEIGHT, top: RULER_HEIGHT, background: 'linear-gradient(rgba(245,158,11,0.04), rgba(245,158,11,0.04)), #111827' }}
               onMouseDown={(e) => {
                 // Click empty camera track: deselect any zoom + seek
                 if (e.target === e.currentTarget) {
                   onSelectZoom(null)
-                  const rect = containerRef.current?.getBoundingClientRect()
-                  if (!rect) return
-                  const scrollLeft = containerRef.current?.scrollLeft ?? 0
-                  const x = e.clientX - rect.left + scrollLeft
-                  onSeek(xToTime(x))
+                  onSeek(clientXToTime(e.clientX))
                 }
               }}
             >
@@ -556,12 +584,7 @@ export default function Timeline({
                 if (e.target === e.currentTarget) {
                   onSelectObject(null)
                   onSelectZoom(null)
-                  // Also seek
-                  const rect = containerRef.current?.getBoundingClientRect()
-                  if (!rect) return
-                  const scrollLeft = containerRef.current?.scrollLeft ?? 0
-                  const x = e.clientX - rect.left + scrollLeft
-                  onSeek(xToTime(x))
+                  onSeek(clientXToTime(e.clientX))
                 }
               }}
             >
@@ -872,12 +895,14 @@ export default function Timeline({
             {/* Blank lane spacer for "add below" CTA alignment */}
             <div style={{ height: LANE_HEIGHT }} />
 
-            {/* Playhead — spans full timeline height (ruler + spacers + lanes) */}
+            {/* Playhead — spans the full content height; drawn over the pinned ruler/Camera track
+                (zIndex 65 > their 60) but under the frozen lane gutter (z-[70]) so it hides under it. */}
             <div
-              className="absolute top-0 w-0.5 bg-red-500 z-20 pointer-events-none"
+              className="absolute top-0 w-0.5 bg-red-500 pointer-events-none"
               style={{
                 left: timeToX(globalTime),
                 height: '100%',
+                zIndex: 65,
               }}
             />
           </div>

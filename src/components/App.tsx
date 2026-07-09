@@ -16,6 +16,18 @@ import PropertiesPanel from './PropertiesPanel'
 import ImportModal from './ImportModal'
 import ExportModal from './ExportModal'
 
+// Timeline resize/collapse (spec 16 B). Ephemeral view state — not persisted, not part of undo.
+const HEADER_HEIGHT = 48 // top bar (h-12)
+const MIN_TIMELINE_HEIGHT = 140 // ruler + Camera track + ~1 lane + add-lane rows stay usable
+const MIN_RENDER_HEIGHT = 200 // never let the timeline starve the render below this
+const COLLAPSED_TIMELINE_HEIGHT = 32
+
+const maxTimelineHeight = () =>
+  Math.max(MIN_TIMELINE_HEIGHT, window.innerHeight - HEADER_HEIGHT - MIN_RENDER_HEIGHT)
+const clampTimelineHeight = (h: number) =>
+  Math.max(MIN_TIMELINE_HEIGHT, Math.min(maxTimelineHeight(), h))
+const defaultTimelineHeight = () => clampTimelineHeight(Math.round(window.innerHeight * 0.35))
+
 export default function App() {
   const { project, dispatch, canUndo, canRedo, undo, redo } = useProject()
   const playback = usePlayback(project)
@@ -35,6 +47,36 @@ export default function App() {
   const [showImport, setShowImport] = useState(false)
   const [showExport, setShowExport] = useState(false)
   const projectFileRef = useRef<HTMLInputElement>(null)
+
+  // Timeline resize/collapse (spec 16 B). Both are ephemeral view state (like cameraView).
+  const [timelineHeight, setTimelineHeight] = useState<number>(defaultTimelineHeight)
+  const [timelineCollapsed, setTimelineCollapsed] = useState(false)
+  const splitterDragRef = useRef<{ startY: number; startHeight: number } | null>(null)
+
+  const handleSplitterDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    splitterDragRef.current = { startY: e.clientY, startHeight: timelineHeight }
+  }, [timelineHeight])
+
+  // Splitter drag (B1/B2) + re-clamp on window resize (B5).
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      const d = splitterDragRef.current
+      if (!d) return
+      // Drag up (smaller clientY) grows the timeline; down shrinks it.
+      setTimelineHeight(clampTimelineHeight(d.startHeight - (e.clientY - d.startY)))
+    }
+    const onUp = () => { splitterDragRef.current = null }
+    const onResize = () => setTimelineHeight((h) => clampTimelineHeight(h))
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+    window.addEventListener('resize', onResize)
+    return () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+      window.removeEventListener('resize', onResize)
+    }
+  }, [])
 
   const selectedObject = project.objects.find((o) => o.id === selectedObjectId) ?? null
   const selectedZoom = project.zooms?.find((z) => z.id === selectedZoomId) ?? null
@@ -438,19 +480,43 @@ export default function App() {
         />
       </div>
 
-      {/* Timeline */}
-      <Timeline
-        objects={project.objects}
-        globalTime={playback.globalTime}
-        totalDuration={playback.totalDuration}
-        selectedObjectId={selectedObjectId}
-        onSelectObject={handleSelectObject}
-        onSeek={playback.seek}
-        dispatch={dispatch}
-        zooms={project.zooms}
-        selectedZoomId={selectedZoomId}
-        onSelectZoom={handleSelectZoom}
-      />
+      {/* Timeline (spec 16 B): bounded height, resizable via a splitter, collapsible to a slim bar. */}
+      {timelineCollapsed ? (
+        <div className="shrink-0 flex items-center justify-between px-3 bg-gray-900 border-t border-gray-700" style={{ height: COLLAPSED_TIMELINE_HEIGHT }}>
+          <span className="text-xs text-gray-400">Timeline</span>
+          <button
+            onClick={() => setTimelineCollapsed(false)}
+            className="px-2 py-0.5 text-xs text-gray-400 hover:text-white flex items-center gap-1 cursor-pointer"
+            title="Expand timeline"
+          >
+            <span className="text-[10px] leading-none">▴</span> Expand
+          </button>
+        </div>
+      ) : (
+        <>
+          {/* Drag handle — resize the render / timeline split */}
+          <div
+            onMouseDown={handleSplitterDown}
+            className="shrink-0 h-1.5 cursor-row-resize bg-gray-800 hover:bg-indigo-500/60 transition-colors"
+            title="Drag to resize timeline"
+          />
+          <div className="shrink-0" style={{ height: timelineHeight }}>
+            <Timeline
+              objects={project.objects}
+              globalTime={playback.globalTime}
+              totalDuration={playback.totalDuration}
+              selectedObjectId={selectedObjectId}
+              onSelectObject={handleSelectObject}
+              onSeek={playback.seek}
+              dispatch={dispatch}
+              zooms={project.zooms}
+              selectedZoomId={selectedZoomId}
+              onSelectZoom={handleSelectZoom}
+              onCollapse={() => setTimelineCollapsed(true)}
+            />
+          </div>
+        </>
+      )}
 
       {/* Modals */}
       {showImport && (

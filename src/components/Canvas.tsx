@@ -9,6 +9,22 @@ import { resolveCamera, cameraFrameRect, isIdentityCamera, governingZoomAt } fro
 const ARROW_MAX_POINTS = 10
 const ZOOM_ACCENT = '#f59e0b' // amber — matches the zoom panel header
 
+// Editor viewport zoom/pan (spec 16 C). Editor-only magnification of the canvas viewer —
+// NOT the camera zoom (spec 13, exported), NOT object resize. 100% (scale 1) = fit-to-window.
+type ViewportState = { scale: number; panX: number; panY: number }
+const IDENTITY_VIEWPORT: ViewportState = { scale: 1, panX: 0, panY: 0 }
+const MIN_ZOOM = 0.25
+const MAX_ZOOM = 4
+const WHEEL_ZOOM_FACTOR = 1.1
+const BUTTON_ZOOM_FACTOR = 1.2
+
+// Clamp a pan offset (px, top-left origin) so the transformed canvas keeps covering the fit box
+// when zoomed in, and stays inside it when zoomed out — no runaway empty margins.
+function clampPan(pan: number, layerSize: number, boxSize: number): number {
+  if (layerSize >= boxSize) return Math.max(boxSize - layerSize, Math.min(0, pan))
+  return Math.max(0, Math.min(boxSize - layerSize, pan))
+}
+
 // === Types ===
 
 type HandleId = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w'
@@ -446,6 +462,68 @@ export default function Canvas({
   const mouseNormRef = useRef<{ nx: number; ny: number } | null>(null)
   const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number } | null>(null)
 
+  // Editor viewport zoom/pan (spec 16 C). Ephemeral view state — resets to Fit on aspect change.
+  const [viewport, setViewport] = useState<ViewportState>(IDENTITY_VIEWPORT)
+  const viewportRef = useRef(viewport)
+  viewportRef.current = viewport
+  const fitBoxRef = useRef<HTMLDivElement>(null)     // the letterboxed fit box (stable under transform)
+  const renderAreaRef = useRef<HTMLDivElement>(null) // the whole render area (wheel target)
+  const panRef = useRef<{ startX: number; startY: number; panX0: number; panY0: number } | null>(null)
+
+  // Zoom by `factor` about a fit-box-local point (cx,cy); defaults to the fit box center.
+  const zoomAt = useCallback((factor: number, cx?: number, cy?: number) => {
+    const fit = fitBoxRef.current?.getBoundingClientRect()
+    if (!fit) return
+    const fx = cx ?? fit.width / 2
+    const fy = cy ?? fit.height / 2
+    setViewport((v) => {
+      const sNew = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, v.scale * factor))
+      const k = sNew / v.scale
+      const panX = clampPan(fx - (fx - v.panX) * k, fit.width * sNew, fit.width)
+      const panY = clampPan(fy - (fy - v.panY) * k, fit.height * sNew, fit.height)
+      return { scale: sNew, panX, panY }
+    })
+  }, [])
+
+  const resetViewport = useCallback(() => setViewport(IDENTITY_VIEWPORT), [])
+
+  // Reset to Fit when the project aspect ratio changes (spec 16 C8) — stale offsets otherwise.
+  useEffect(() => { setViewport(IDENTITY_VIEWPORT) }, [width, height])
+
+  // Plain mouse-wheel over the render area = zoom to cursor (spec 16 C2). Native non-passive
+  // listener so preventDefault reliably stops page/scroll; React onWheel can be passive.
+  useEffect(() => {
+    const el = renderAreaRef.current
+    if (!el) return
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault()
+      const fit = fitBoxRef.current?.getBoundingClientRect()
+      if (!fit) return
+      zoomAt(e.deltaY > 0 ? 1 / WHEEL_ZOOM_FACTOR : WHEEL_ZOOM_FACTOR, e.clientX - fit.left, e.clientY - fit.top)
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onWheel)
+  }, [zoomAt])
+
+  // Pan via middle-mouse drag (spec 16 C3). Started in handleMouseDown; tracked on window.
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      const p = panRef.current
+      if (!p) return
+      const fit = fitBoxRef.current?.getBoundingClientRect()
+      if (!fit) return
+      setViewport((v) => ({
+        scale: v.scale,
+        panX: clampPan(p.panX0 + (e.clientX - p.startX), fit.width * v.scale, fit.width),
+        panY: clampPan(p.panY0 + (e.clientY - p.startY), fit.height * v.scale, fit.height),
+      }))
+    }
+    const onUp = () => { if (panRef.current) { panRef.current = null; setCursor('default') } }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+    return () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp) }
+  }, [])
+
   const isLive = cameraView === 'live'
   const selectedZoom = zooms?.find((z) => z.id === selectedZoomId) ?? null
 
@@ -761,6 +839,15 @@ export default function Canvas({
       const canvas = overlayCanvasRef.current
       if (!canvas) return
 
+      // Middle-mouse drag = pan the editor viewport (spec 16 C3). Works in any mode/view.
+      if (e.button === 1) {
+        e.preventDefault()
+        const v = viewportRef.current
+        panRef.current = { startX: e.clientX, startY: e.clientY, panX0: v.panX, panY0: v.panY }
+        setCursor('grabbing')
+        return
+      }
+
       const { nx, ny } = clientToNorm(e, canvas)
 
       // --- Camera zoom editing (Frame view only; Live view is playback-only, R6) ---
@@ -880,6 +967,7 @@ export default function Canvas({
     (e: React.MouseEvent<HTMLCanvasElement>) => {
       const canvas = overlayCanvasRef.current
       if (!canvas) return
+      if (panRef.current) return // middle-mouse viewport pan owns the cursor while active
 
       const { nx, ny } = clientToNorm(e, canvas)
       mouseNormRef.current = { nx, ny }
@@ -1137,18 +1225,24 @@ export default function Canvas({
     return `Click to add points \u00b7 Right-click to finish with ${segments} segment${segments !== 1 ? 's' : ''}`
   }, [interactionMode, selectedObject])
 
+  const viewportTransform = `translate(${viewport.panX}px, ${viewport.panY}px) scale(${viewport.scale})`
+  const zoomPct = Math.round(viewport.scale * 100)
+
   return (
-    <div className="flex-1 flex items-center justify-center bg-gray-950 p-4 overflow-hidden">
-      <div className="relative max-w-full max-h-full" style={{ aspectRatio: `${width}/${height}` }}>
+    <div ref={renderAreaRef} className="flex-1 flex items-center justify-center bg-gray-950 p-4 overflow-hidden">
+      <div ref={fitBoxRef} className="relative max-w-full max-h-full" style={{ aspectRatio: `${width}/${height}` }}>
+        {/* Both canvases share the SAME editor viewport transform (spec 16 C). CSS transforms don't
+            affect layout, so the fit box keeps its size and getBoundingClientRect reflects the
+            transform — hit-testing / overlay math stay correct with zero changes. */}
         <canvas
           ref={renderCanvasRef}
           className="block w-full h-full rounded shadow-lg"
-          style={{ aspectRatio: `${width}/${height}` }}
+          style={{ aspectRatio: `${width}/${height}`, transform: viewportTransform, transformOrigin: '0 0' }}
         />
         <canvas
           ref={overlayCanvasRef}
           className="absolute inset-0 w-full h-full"
-          style={{ cursor }}
+          style={{ cursor, transform: viewportTransform, transformOrigin: '0 0' }}
           onMouseDown={handleMouseDown}
           onMouseMove={handleMouseMove}
           onMouseUp={handleMouseUp}
@@ -1178,6 +1272,16 @@ export default function Canvas({
         >
           {isLive ? '● Live' : '○ Frame'}
         </button>
+
+        {/* Editor viewport zoom controls (spec 16 D). Editor-only magnification — never exported.
+            Wheel over the canvas zooms to the cursor; middle-drag pans. 100% = fit-to-window. */}
+        <div className="absolute bottom-2 right-2 flex items-center bg-gray-800/90 rounded shadow text-xs text-gray-200 select-none">
+          <button onClick={() => zoomAt(1 / BUTTON_ZOOM_FACTOR)} className="px-2 py-1 hover:bg-gray-700 rounded-l cursor-pointer" title="Zoom out">−</button>
+          <button onClick={resetViewport} className="px-1.5 py-1 min-w-[3.25rem] text-center tabular-nums hover:bg-gray-700 cursor-pointer" title="Reset to Fit (100%)">{zoomPct}%</button>
+          <button onClick={() => zoomAt(BUTTON_ZOOM_FACTOR)} className="px-2 py-1 hover:bg-gray-700 cursor-pointer" title="Zoom in">+</button>
+          <span className="w-px h-4 bg-gray-600" />
+          <button onClick={resetViewport} className="px-2 py-1 hover:bg-gray-700 rounded-r cursor-pointer" title="Fit to window">Fit</button>
+        </div>
       </div>
     </div>
   )
