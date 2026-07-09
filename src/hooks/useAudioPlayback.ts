@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback } from 'react'
 import type { TimelineObject, AudioData, VideoData } from '../types'
 import { getAssetUrl } from '../lib/assetStore'
 import { registerVideoElement, unregisterVideoElement } from '../lib/mediaRegistry'
+import { clipRate, sourceTimeAt } from '../lib/mediaTiming'
 
 type MediaEntry = {
   objectId: string
@@ -61,15 +62,18 @@ export function useAudioPlayback(
 
     for (const obj of objects) {
       if (obj.type !== 'audio' && obj.type !== 'video') continue
+      // Hidden clips (spec 14 R11): don't register a media element. Not adding to
+      // currentIds means the cleanup loop below pauses + unregisters any element that
+      // was live before the object was hidden (so useCanvasRenderer stops blitting it).
+      if (obj.hidden) continue
       currentIds.add(obj.id)
 
       const data = obj.data as AudioData | VideoData
       const existing = entries.get(obj.id)
 
       if (existing && existing.assetId === data.assetId) {
-        // Update volume and playbackRate on existing element
-        const rate = data.originalDuration / obj.duration
-        existing.element.playbackRate = Math.max(0.25, Math.min(4, rate))
+        // Update volume and playbackRate on existing element (rate honors trim: span/duration)
+        existing.element.playbackRate = clipRate(data, obj.duration)
         existing.element.volume = clamp01(data.volume * volumeRef.current)
         existing.originalDuration = data.originalDuration
         existing.volume = data.volume
@@ -94,8 +98,7 @@ export function useAudioPlayback(
       el.volume = clamp01(data.volume * volumeRef.current)
       el.muted = isMuted
 
-      const rate = data.originalDuration / obj.duration
-      el.playbackRate = Math.max(0.25, Math.min(4, rate))
+      el.playbackRate = clipRate(data, obj.duration)
 
       // Video elements double as the canvas image source (A2). playsInline lets a
       // detached element decode frames; register it so useCanvasRenderer can draw it.
@@ -130,12 +133,12 @@ export function useAudioPlayback(
 
     for (const obj of objects) {
       if (obj.type !== 'audio' && obj.type !== 'video') continue
+      if (obj.hidden) continue
       const entry = entries.get(obj.id)
       if (!entry) continue
 
       const el = entry.element
-      const rate = entry.originalDuration / obj.duration
-      const clampedRate = Math.max(0.25, Math.min(4, rate))
+      const data = obj.data as AudioData | VideoData
 
       // Is this clip active at the current time?
       const clipStart = obj.startTime
@@ -143,16 +146,15 @@ export function useAudioPlayback(
       const isActive = globalTime >= clipStart && globalTime < clipEnd
 
       if (isActive && isPlaying) {
-        // Calculate the position within the source media
+        // Position within the source media honors trim: sourceIn + progress*span
         const clipProgress = (globalTime - clipStart) / obj.duration
-        const sourceTime = clipProgress * entry.originalDuration
+        const sourceTime = sourceTimeAt(data, clipProgress)
 
-        el.playbackRate = clampedRate
+        el.playbackRate = clipRate(data, obj.duration)
 
         // Only seek if we're significantly out of sync (>0.3s)
-        const expectedTime = sourceTime
-        if (Math.abs(el.currentTime - expectedTime) > 0.3) {
-          el.currentTime = expectedTime
+        if (Math.abs(el.currentTime - sourceTime) > 0.3) {
+          el.currentTime = sourceTime
         }
 
         if (el.paused) {
@@ -165,7 +167,7 @@ export function useAudioPlayback(
         if (isActive) {
           // Paused but active — seek to correct position
           const clipProgress = (globalTime - clipStart) / obj.duration
-          el.currentTime = clipProgress * entry.originalDuration
+          el.currentTime = sourceTimeAt(data, clipProgress)
         }
       }
     }
@@ -178,6 +180,7 @@ export function useAudioPlayback(
 
     for (const obj of objects) {
       if (obj.type !== 'audio' && obj.type !== 'video') continue
+      if (obj.hidden) continue
       const entry = entries.get(obj.id)
       if (!entry) continue
 
@@ -186,8 +189,9 @@ export function useAudioPlayback(
       const isActive = globalTime >= clipStart && globalTime < clipEnd
 
       if (isActive) {
+        const data = obj.data as AudioData | VideoData
         const clipProgress = (globalTime - clipStart) / obj.duration
-        entry.element.currentTime = clipProgress * entry.originalDuration
+        entry.element.currentTime = sourceTimeAt(data, clipProgress)
       }
     }
   }, [objects, globalTime, isPlaying])

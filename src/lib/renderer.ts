@@ -38,20 +38,19 @@ export function renderFrame(
   ctx.fillStyle = '#000000'
   ctx.fillRect(0, 0, w, h)
 
-  // Filter to visible objects and sort by lane ascending (low = back)
+  // Filter to visible objects and sort by lane ascending (low = back).
+  // `!obj.hidden` (spec 14 R11): hidden objects stay in the project/timeline but are
+  // skipped in every render path — this single filter covers preview AND export.
   const visible = objects
-    .filter((obj) => globalTime >= obj.startTime && globalTime < obj.startTime + obj.duration)
+    .filter((obj) => !obj.hidden && globalTime >= obj.startTime && globalTime < obj.startTime + obj.duration)
     .sort((a, b) => a.lane - b.lane)
 
-  // Camera transform (spec 13): a single global translate/scale wrapping the object loop.
-  // Composes over every object for free since object coords are normalized 0–1. Absent or
-  // identity camera => no-op => pixel-identical to pre-spec-13 output (R3/R11).
-  ctx.save()
-  if (camera != null && !isIdentityCamera(camera)) {
-    ctx.translate(w / 2, h / 2)
-    ctx.scale(camera.scale, camera.scale)
-    ctx.translate(-camera.x * w, -camera.y * h)
-  }
+  // Camera transform (spec 13): a translate/scale applied PER OBJECT (not once around the whole
+  // loop) so an object can opt out via `ignoreCamera` and stay pinned to the full frame while its
+  // neighbors zoom — and lane/z-order is still preserved because we walk the sorted list once.
+  // Composes over every object for free since object coords are normalized 0–1. Absent or identity
+  // camera => no transform => pixel-identical to pre-spec-13 output (R3/R11).
+  const cam = camera != null && !isIdentityCamera(camera) ? camera : null
 
   for (const rawObj of visible) {
     const elapsed = globalTime - rawObj.startTime
@@ -62,26 +61,29 @@ export function renderFrame(
     // Resolve keyframes + enter/exit transitions (identity when the object has neither)
     const obj = resolveRenderPose(rawObj, globalTime)
 
+    ctx.save()
+    if (cam && !rawObj.ignoreCamera) {
+      ctx.translate(w / 2, h / 2)
+      ctx.scale(cam.scale, cam.scale)
+      ctx.translate(-cam.x * w, -cam.y * h)
+    }
+
     // Active drawing object: full opacity, no ghost
     if (activeDrawingObjectId === obj.id) {
       drawObject(ctx, obj, 1.0, w, h, imageCache)
-      continue
-    }
-
-    // Ghost preview: two-pass rendering for editor mode
-    if (editorMode && progress < 1 && obj.type !== 'photo') {
+    } else if (editorMode && progress < 1 && obj.type !== 'photo') {
+      // Ghost preview: two-pass rendering for editor mode.
       // Pass 1: ghost of full shape at reduced opacity
       const ghostStyle = { ...obj.style, opacity: obj.style.opacity * GHOST_ALPHA }
       drawObject(ctx, obj, 1.0, w, h, imageCache, ghostStyle)
       // Pass 2: animated portion at full opacity
       drawObject(ctx, obj, progress, w, h, imageCache)
-      continue
+    } else {
+      drawObject(ctx, obj, progress, w, h, imageCache)
     }
 
-    drawObject(ctx, obj, progress, w, h, imageCache)
+    ctx.restore()
   }
-
-  ctx.restore()
 }
 
 function drawObject(

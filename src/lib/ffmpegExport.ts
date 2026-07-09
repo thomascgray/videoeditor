@@ -1,9 +1,11 @@
 import type { Project, PhotoData, AudioData, VideoData } from '../types'
 import { renderFrame, loadImage } from './renderer'
 import { resolveCamera } from './camera'
+import { clipRate, sourceTimeAt, srcIn, sourceSpan } from './mediaTiming'
 import { getAssetUrl, getAssetBlob } from './assetStore'
 import { createVideoFrameSource, type VideoFrameSource } from './videoDecoder'
-import type { ExportWorkerRequest, ExportWorkerResponse, RenderedAudio } from './exportWorkerTypes'
+import type { ExportWorkerRequest, ExportWorkerResponse, RenderedAudio, EncodeConfig } from './exportWorkerTypes'
+import { resolveEncodeConfig, type ExportSettings } from './exportSettings'
 import { Muxer, ArrayBufferTarget } from 'mp4-muxer'
 
 /**
@@ -33,16 +35,20 @@ function abortError(): DOMException {
  */
 export async function exportVideo(
   project: Project,
+  settings: ExportSettings,
   onProgress: (pct: number) => void,
   signal?: AbortSignal,
 ): Promise<Blob> {
+  // Resolve the resolution/compression choices (issue #6) into concrete output
+  // dimensions + video bitrate once, up front — every path below encodes to these.
+  const encode = resolveEncodeConfig(project, settings)
   if (hasWebCodecsSupport()) {
     if (hasWorkerExportSupport()) {
-      return exportWithWorker(project, onProgress, signal)
+      return exportWithWorker(project, encode, onProgress, signal)
     }
-    return exportWithWebCodecs(project, onProgress, signal)
+    return exportWithWebCodecs(project, encode, onProgress, signal)
   }
-  return exportWithMediaRecorder(project, onProgress, signal)
+  return exportWithMediaRecorder(project, encode, onProgress, signal)
 }
 
 // ---------------------------------------------------------------------------
@@ -51,6 +57,7 @@ export async function exportVideo(
 
 async function exportWithWorker(
   project: Project,
+  encode: EncodeConfig,
   onProgress: (pct: number) => void,
   signal?: AbortSignal,
 ): Promise<Blob> {
@@ -96,7 +103,7 @@ async function exportWithWorker(
           // B5 tier 2: worker couldn't decode a clip (no HTMLVideoElement in a
           // worker). Retry on the main thread, which has the element-seek fallback.
           console.warn('[export] worker path unsupported, falling back to main thread:', msg.message)
-          try { resolve(await exportWithWebCodecs(project, onProgress, signal)) }
+          try { resolve(await exportWithWebCodecs(project, encode, onProgress, signal)) }
           catch (err) { reject(err) }
         } else {
           reject(new Error(msg.message))
@@ -113,7 +120,7 @@ async function exportWithWorker(
     // Transfer the audio channel buffers (zero-copy); exportWithWebCodecs re-renders
     // its own audio on the fallback path, so detaching them here is safe.
     const transfer = audio ? audio.channelData.map((c) => c.buffer) : []
-    const req: ExportWorkerRequest = { type: 'start', project, assetBlobs, audio }
+    const req: ExportWorkerRequest = { type: 'start', project, assetBlobs, audio, encode }
     worker.postMessage(req, transfer)
   })
 }
@@ -145,7 +152,7 @@ async function prerenderAudioMix(project: Project): Promise<RenderedAudio | null
     0,
   )
   const audioVideoObjects = objects.filter(
-    (o) => o.type === 'audio' || o.type === 'video',
+    (o) => (o.type === 'audio' || o.type === 'video') && !o.hidden,
   )
   if (audioVideoObjects.length === 0) return null
 
@@ -165,13 +172,13 @@ async function prerenderAudioMix(project: Project): Promise<RenderedAudio | null
       const decoded = await offlineCtx.decodeAudioData(arrayBuffer)
       const source = offlineCtx.createBufferSource()
       source.buffer = decoded
-      const rate = data.originalDuration / obj.duration
-      source.playbackRate.value = Math.max(0.25, Math.min(4, rate))
+      source.playbackRate.value = clipRate(data, obj.duration)
       const gain = offlineCtx.createGain()
       gain.gain.value = data.volume
       source.connect(gain)
       gain.connect(offlineCtx.destination)
-      source.start(obj.startTime)
+      // Trim: start at sourceIn, play only the source span (spec 14 R6).
+      source.start(obj.startTime, srcIn(data), sourceSpan(data))
     } catch {
       continue
     }
@@ -216,10 +223,14 @@ type VideoSource =
 
 async function exportWithWebCodecs(
   project: Project,
+  encode: EncodeConfig,
   onProgress: (pct: number) => void,
   signal?: AbortSignal,
 ): Promise<Blob> {
-  const { fps, width, height, objects } = project
+  const { fps, objects } = project
+  // Output dimensions/bitrate come from the export settings (issue #6), not the
+  // project — renderFrame scales normalized coords + fontSize/lineWidth to fit.
+  const { width, height, videoBitrate } = encode
 
   const totalDuration = objects.reduce(
     (max, obj) => Math.max(max, obj.startTime + obj.duration),
@@ -238,6 +249,7 @@ async function exportWithWebCodecs(
   const videoSources = new Map<string, VideoSource>() // keyed by object id
 
   for (const obj of objects) {
+    if (obj.hidden) continue  // spec 14 R11: hidden clips are never drawn, so skip asset setup
     if (obj.type === 'photo') {
       const assetId = (obj.data as PhotoData).assetId
       if (!imageCache.has(assetId)) {
@@ -282,7 +294,7 @@ async function exportWithWebCodecs(
   const ctx = canvas.getContext('2d')!
 
   // --- Find a supported H.264 encoder config ---
-  const encoderConfig = await findSupportedVideoCodec(width, height, fps)
+  const encoderConfig = await findSupportedVideoCodec(width, height, fps, videoBitrate)
 
   // --- Encode video frames ---
   const videoChunks: StoredChunk[] = []
@@ -304,7 +316,7 @@ async function exportWithWebCodecs(
 
   videoEncoder.configure(encoderConfig)
 
-  const videoObjects = objects.filter((o) => o.type === 'video')
+  const videoObjects = objects.filter((o) => o.type === 'video' && !o.hidden)
 
   const cleanupVideoSources = () => {
     for (const vs of videoSources.values()) {
@@ -333,7 +345,7 @@ async function exportWithWebCodecs(
         if (globalTime < clipStart || globalTime >= clipEnd) continue
 
         const clipProgress = (globalTime - clipStart) / obj.duration
-        const sourceTime = clipProgress * data.originalDuration
+        const sourceTime = sourceTimeAt(data, clipProgress)
 
         if (vs.kind === 'decoder') {
           // Sequential decode (B1) — frame-accurate. The returned frame is owned
@@ -392,7 +404,7 @@ async function exportWithWebCodecs(
   // --- Pre-render audio mix ---
   const audioChunks: StoredChunk[] = []
   const audioVideoObjects = objects.filter(
-    (o) => o.type === 'audio' || o.type === 'video',
+    (o) => (o.type === 'audio' || o.type === 'video') && !o.hidden,
   )
 
   let audioSampleRate = 48000
@@ -418,15 +430,15 @@ async function exportWithWebCodecs(
         const source = offlineCtx.createBufferSource()
         source.buffer = decoded
 
-        const rate = data.originalDuration / obj.duration
-        source.playbackRate.value = Math.max(0.25, Math.min(4, rate))
+        source.playbackRate.value = clipRate(data, obj.duration)
 
         const gain = offlineCtx.createGain()
         gain.gain.value = data.volume
 
         source.connect(gain)
         gain.connect(offlineCtx.destination)
-        source.start(obj.startTime)
+        // Trim: start at sourceIn, play only the source span (spec 14 R6).
+        source.start(obj.startTime, srcIn(data), sourceSpan(data))
       } catch {
         continue
       }
@@ -567,6 +579,7 @@ async function findSupportedVideoCodec(
   width: number,
   height: number,
   framerate: number,
+  bitrate: number,
 ): Promise<VideoEncoderConfig> {
   const codecs = [
     'avc1.640028', // High Profile, Level 4.0
@@ -582,7 +595,7 @@ async function findSupportedVideoCodec(
       codec,
       width,
       height,
-      bitrate: 8_000_000,
+      bitrate,
       framerate,
     }
 
@@ -605,10 +618,12 @@ async function findSupportedVideoCodec(
 
 async function exportWithMediaRecorder(
   project: Project,
+  encode: EncodeConfig,
   onProgress: (pct: number) => void,
   signal?: AbortSignal,
 ): Promise<Blob> {
-  const { fps, width, height, objects } = project
+  const { fps, objects } = project
+  const { width, height, videoBitrate } = encode
 
   const totalDuration = objects.reduce(
     (max, obj) => Math.max(max, obj.startTime + obj.duration),
@@ -621,6 +636,7 @@ async function exportWithMediaRecorder(
 
   const imageCache = new Map<string, HTMLImageElement | HTMLVideoElement>()
   for (const obj of objects) {
+    if (obj.hidden) continue  // spec 14 R11: hidden clips are never drawn, so skip asset setup
     if (obj.type === 'photo') {
       const assetId = (obj.data as PhotoData).assetId
       if (!imageCache.has(assetId)) {
@@ -656,7 +672,7 @@ async function exportWithMediaRecorder(
   const videoTrack = videoStream.getVideoTracks()[0]
 
   const audioVideoObjects = objects.filter(
-    (o) => o.type === 'audio' || o.type === 'video',
+    (o) => (o.type === 'audio' || o.type === 'video') && !o.hidden,
   )
 
   let combinedStream: MediaStream
@@ -685,15 +701,15 @@ async function exportWithMediaRecorder(
         const source = offlineCtx.createBufferSource()
         source.buffer = decoded
 
-        const rate = data.originalDuration / obj.duration
-        source.playbackRate.value = Math.max(0.25, Math.min(4, rate))
+        source.playbackRate.value = clipRate(data, obj.duration)
 
         const gain = offlineCtx.createGain()
         gain.gain.value = data.volume
 
         source.connect(gain)
         gain.connect(offlineCtx.destination)
-        source.start(obj.startTime)
+        // Trim: start at sourceIn, play only the source span (spec 14 R6).
+        source.start(obj.startTime, srcIn(data), sourceSpan(data))
       } catch {
         continue
       }
@@ -716,7 +732,7 @@ async function exportWithMediaRecorder(
   const chunks: Blob[] = []
   const recorder = new MediaRecorder(combinedStream, {
     mimeType: getSupportedMimeType(),
-    videoBitsPerSecond: 8_000_000,
+    videoBitsPerSecond: videoBitrate,
   })
 
   recorder.ondataavailable = (e) => {
@@ -729,7 +745,7 @@ async function exportWithMediaRecorder(
 
   recorder.start()
 
-  const videoObjects = objects.filter((o) => o.type === 'video')
+  const videoObjects = objects.filter((o) => o.type === 'video' && !o.hidden)
 
   for (let f = 0; f < totalFrames; f++) {
     if (signal?.aborted) {
@@ -748,7 +764,7 @@ async function exportWithMediaRecorder(
       const clipEnd = obj.startTime + obj.duration
       if (globalTime >= clipStart && globalTime < clipEnd) {
         const clipProgress = (globalTime - clipStart) / obj.duration
-        const sourceTime = clipProgress * data.originalDuration
+        const sourceTime = sourceTimeAt(data, clipProgress)
         videoEl.currentTime = sourceTime
         await new Promise<void>((resolve) => {
           videoEl.onseeked = () => resolve()

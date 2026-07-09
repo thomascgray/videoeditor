@@ -2,6 +2,7 @@ import { useRef, useCallback, useState, useEffect } from 'react'
 import type { TimelineObject, ProjectAction, AudioData, VideoData, CameraZoom } from '../types'
 import { keyframeColor } from '../lib/keyframes'
 import { zoomEnvelope } from '../lib/camera'
+import { sourceSpan, srcIn, srcOut } from '../lib/mediaTiming'
 
 type TimelineProps = {
   objects: TimelineObject[]
@@ -26,6 +27,9 @@ const MIN_PIXELS_PER_SECOND = 20
 const MAX_PIXELS_PER_SECOND = 400
 const DEFAULT_PIXELS_PER_SECOND = 80
 const TIMELINE_PADDING_SECONDS = 5
+// Below this bar width, an audio/video clip is too narrow to safely split the edge handle
+// into speed (top) + trim (bottom) halves, so it falls back to a single speed handle (R8).
+const SPLIT_HANDLE_MIN_WIDTH = 28
 const ZOOM_COLOR = '#f59e0b' // amber — matches the canvas framing rect + zoom panel
 
 const formatTime = (seconds: number): string => {
@@ -50,6 +54,11 @@ type DragState =
   | { kind: 'move'; objectId: string; startMouseX: number; startMouseY: number; originalStartTime: number; originalLane: number; clampMinLane: number; clampMaxLane: number }
   | { kind: 'resize-left'; objectId: string; startMouseX: number; originalStartTime: number; originalDuration: number }
   | { kind: 'resize-right'; objectId: string; startMouseX: number; originalDuration: number }
+  // Trim (spec 14 R8): rate-constant edge-drag on audio/video. Adjusts the source span + duration
+  // (and startTime on the left edge, keeping the right timeline edge fixed) so playback speed is
+  // preserved — the bottom half of the split edge handle.
+  | { kind: 'trim-left'; objectId: string; startMouseX: number; originalStartTime: number; originalDuration: number; originalSourceIn: number; originalSourceOut: number; assetDuration: number }
+  | { kind: 'trim-right'; objectId: string; startMouseX: number; originalDuration: number; originalSourceIn: number; originalSourceOut: number; assetDuration: number }
   | { kind: 'move-keyframe'; objectId: string; kfIndex: number; startMouseX: number; originalTime: number; minTime: number; maxTime: number }
   | { kind: 'playhead'; startMouseX: number; startTime: number }
   // Camera-zoom bars on the pinned Camera track (spec 13). Move shifts startTime; resizing
@@ -57,6 +66,22 @@ type DragState =
   | { kind: 'zoom-move'; zoomId: string; startMouseX: number; originalStartTime: number }
   | { kind: 'zoom-resize-right'; zoomId: string; startMouseX: number; originalHold: number }
   | { kind: 'zoom-resize-left'; zoomId: string; startMouseX: number; originalStartTime: number; originalHold: number }
+
+/** Feather-style eye / eye-off glyph for the hide toggle (spec 14 R11). */
+function EyeIcon({ off }: { off: boolean }) {
+  return off ? (
+    <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M9.9 4.24A9.1 9.1 0 0 1 12 4c7 0 10 8 10 8a13.2 13.2 0 0 1-1.67 2.68M6.6 6.6A13.5 13.5 0 0 0 2 12s3 8 10 8a9.7 9.7 0 0 0 5.4-1.6" />
+      <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" />
+      <line x1="2" y1="2" x2="22" y2="22" />
+    </svg>
+  ) : (
+    <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M2 12s3-8 10-8 10 8 10 8-3 8-10 8-10-8-10-8z" />
+      <circle cx="12" cy="12" r="3" />
+    </svg>
+  )
+}
 
 export default function Timeline({
   objects,
@@ -181,10 +206,12 @@ export default function Timeline({
         const newStart = Math.round(rawStart * 10) / 10
         let newDuration = Math.round((dragState.originalStartTime + dragState.originalDuration - newStart) * 10) / 10
         const obj = objects.find((o) => o.id === dragState.objectId)
-        // Clamp duration for audio/video to respect 0.25x–4x playback rate
+        // Clamp duration for audio/video to respect 0.25x–4x playback rate. Speed-drag keeps the
+        // source span fixed, so the clamp is [span/4, span*4] (== originalDuration for an untrimmed
+        // clip, so this is behavior-identical to before for existing projects).
         if (obj && (obj.type === 'audio' || obj.type === 'video')) {
-          const origDur = (obj.data as AudioData | VideoData).originalDuration
-          newDuration = Math.max(origDur / 4, Math.min(origDur * 4, newDuration))
+          const span = sourceSpan(obj.data as AudioData | VideoData)
+          newDuration = Math.max(span / 4, Math.min(span * 4, newDuration))
         }
         const clampedAnimateIn = obj ? Math.min(obj.animateIn, newDuration) : undefined
         dispatch({
@@ -195,10 +222,12 @@ export default function Timeline({
       } else if (dragState.kind === 'resize-right') {
         let newDuration = Math.round(Math.max(0.1, dragState.originalDuration + dt) * 10) / 10
         const obj = objects.find((o) => o.id === dragState.objectId)
-        // Clamp duration for audio/video to respect 0.25x–4x playback rate
+        // Clamp duration for audio/video to respect 0.25x–4x playback rate. Speed-drag keeps the
+        // source span fixed, so the clamp is [span/4, span*4] (== originalDuration for an untrimmed
+        // clip, so this is behavior-identical to before for existing projects).
         if (obj && (obj.type === 'audio' || obj.type === 'video')) {
-          const origDur = (obj.data as AudioData | VideoData).originalDuration
-          newDuration = Math.max(origDur / 4, Math.min(origDur * 4, newDuration))
+          const span = sourceSpan(obj.data as AudioData | VideoData)
+          newDuration = Math.max(span / 4, Math.min(span * 4, newDuration))
         }
         const clampedAnimateIn = obj ? Math.min(obj.animateIn, newDuration) : undefined
         dispatch({
@@ -206,6 +235,50 @@ export default function Timeline({
           objectId: dragState.objectId,
           updates: { duration: newDuration, ...(clampedAnimateIn !== undefined && { animateIn: clampedAnimateIn }) },
         })
+      } else if (dragState.kind === 'trim-left') {
+        // Left-trim: rate constant, right timeline edge fixed. Shorten/lengthen from the left by
+        // shifting startTime + duration and revealing a different sourceIn. Bounded sourceIn ≥ 0.
+        const origSpan = dragState.originalSourceOut - dragState.originalSourceIn
+        const rate = origSpan / dragState.originalDuration
+        const rightEdge = dragState.originalStartTime + dragState.originalDuration
+        // duration ≤ originalSourceOut/rate keeps sourceIn ≥ 0; duration ≤ rightEdge keeps startTime ≥ 0.
+        const maxDur = Math.min(dragState.originalSourceOut / rate, rightEdge)
+        const newDuration = Math.round(Math.max(0.1, Math.min(maxDur, dragState.originalDuration - dt)) * 100) / 100
+        const newSourceIn = Math.max(0, dragState.originalSourceOut - rate * newDuration)
+        const newStart = Math.round((rightEdge - newDuration) * 100) / 100
+        const obj = objects.find((o) => o.id === dragState.objectId)
+        if (obj) {
+          dispatch({
+            type: 'UPDATE_OBJECT_TRANSIENT',
+            objectId: dragState.objectId,
+            updates: {
+              startTime: newStart,
+              duration: newDuration,
+              animateIn: Math.min(obj.animateIn, newDuration),
+              data: { ...(obj.data as AudioData | VideoData), sourceIn: newSourceIn, sourceOut: dragState.originalSourceOut },
+            },
+          })
+        }
+      } else if (dragState.kind === 'trim-right') {
+        // Right-trim: rate constant, startTime fixed. Reveal a different sourceOut. Bounded by the
+        // asset length (sourceOut ≤ originalDuration of the asset).
+        const origSpan = dragState.originalSourceOut - dragState.originalSourceIn
+        const rate = origSpan / dragState.originalDuration
+        const maxDur = (dragState.assetDuration - dragState.originalSourceIn) / rate
+        const newDuration = Math.round(Math.max(0.1, Math.min(maxDur, dragState.originalDuration + dt)) * 100) / 100
+        const newSourceOut = Math.min(dragState.assetDuration, dragState.originalSourceIn + rate * newDuration)
+        const obj = objects.find((o) => o.id === dragState.objectId)
+        if (obj) {
+          dispatch({
+            type: 'UPDATE_OBJECT_TRANSIENT',
+            objectId: dragState.objectId,
+            updates: {
+              duration: newDuration,
+              animateIn: Math.min(obj.animateIn, newDuration),
+              data: { ...(obj.data as AudioData | VideoData), sourceIn: dragState.originalSourceIn, sourceOut: newSourceOut },
+            },
+          })
+        }
       } else if (dragState.kind === 'move-keyframe') {
         // Retime a single keyframe; clamped between its neighbors so the order never flips.
         const raw = dragState.originalTime + dt
@@ -238,6 +311,7 @@ export default function Timeline({
     const handleMouseUp = () => {
       if (
         dragState.kind === 'move' || dragState.kind === 'move-keyframe' ||
+        dragState.kind === 'trim-left' || dragState.kind === 'trim-right' ||
         dragState.kind === 'zoom-move' || dragState.kind === 'zoom-resize-right' || dragState.kind === 'zoom-resize-left'
       ) {
         dispatch({ type: 'COMMIT_TRANSIENT' })
@@ -410,8 +484,9 @@ export default function Timeline({
                       className="absolute inset-0 rounded-sm overflow-hidden cursor-grab active:cursor-grabbing"
                       style={{
                         backgroundColor: ZOOM_COLOR,
-                        opacity: isSelected ? 1 : 0.72,
-                        outline: isSelected ? '2px solid white' : 'none',
+                        // Hidden zooms (spec 14 R11.3) render dimmed + dashed on the Camera track.
+                        opacity: zoom.hidden ? 0.35 : isSelected ? 1 : 0.72,
+                        outline: isSelected ? '2px solid white' : zoom.hidden ? '1px dashed rgba(255,255,255,0.7)' : 'none',
                         outlineOffset: -1,
                       }}
                       onMouseDown={(e) => {
@@ -451,6 +526,19 @@ export default function Timeline({
                         setDragState({ kind: 'zoom-resize-right', zoomId: zoom.id, startMouseX: e.clientX, originalHold: zoom.hold })
                       }}
                     />
+
+                    {/* Hide toggle for the zoom (spec 14 R11.3) — revealed on hover; always shown when hidden. */}
+                    <button
+                      className={`absolute top-0.5 z-50 flex items-center justify-center rounded text-black hover:bg-white/40 ${zoom.hidden ? 'opacity-100 bg-white/40' : 'opacity-0 group-hover:opacity-100'}`}
+                      style={{ right: 11, width: 16, height: 16 }}
+                      title={zoom.hidden ? 'Show zoom (H)' : 'Hide zoom (H)'}
+                      onMouseDown={(e) => {
+                        e.stopPropagation()
+                        dispatch({ type: 'UPDATE_ZOOM', zoomId: zoom.id, updates: { hidden: !zoom.hidden } })
+                      }}
+                    >
+                      <EyeIcon off={!!zoom.hidden} />
+                    </button>
                   </div>
                 )
               })}
@@ -497,6 +585,16 @@ export default function Timeline({
                 const top = laneToY(obj.lane)
                 const color = TYPE_COLORS[obj.type] ?? '#666'
                 const isSelected = obj.id === selectedObjectId
+                // Media clips get split edge handles (speed on top, trim on bottom — spec 14 R8);
+                // very narrow clips fall back to a single speed handle.
+                const md = obj.type === 'audio' || obj.type === 'video' ? (obj.data as AudioData | VideoData) : null
+                const splitHandles = md !== null && width >= SPLIT_HANDLE_MIN_WIDTH
+                // Trim "ghosts": the played bar (= duration) is solid; the trimmed-off source is drawn
+                // dimmed on each end so the bar keeps its ORIGINAL full length and the trimmed media
+                // stays visible/recoverable — drag a ghost (or the trim handle) back out to restore.
+                const rate = md && obj.duration > 0 ? sourceSpan(md) / obj.duration : 1
+                const leftGhostPx = md ? timeToX(srcIn(md) / rate) : 0
+                const rightGhostPx = md ? timeToX((md.originalDuration - srcOut(md)) / rate) : 0
 
                 return (
                   <div
@@ -509,29 +607,92 @@ export default function Timeline({
                       height: LANE_HEIGHT,
                     }}
                   >
-                    {/* Left resize handle */}
-                    <div
-                      className="absolute left-0 top-0 w-1.5 h-full cursor-col-resize z-40 hover:bg-white/30"
-                      onMouseDown={(e) => {
-                        e.stopPropagation()
-                        onSelectObject(obj.id)
-                        setDragState({
-                          kind: 'resize-left',
-                          objectId: obj.id,
-                          startMouseX: e.clientX,
-                          originalStartTime: obj.startTime,
-                          originalDuration: obj.duration,
-                        })
-                      }}
-                    />
+                    {/* Trim ghosts (spec 14 R8 feedback): dimmed, draggable stubs of trimmed-off
+                        source on each end so the bar keeps its original length and stays restorable.
+                        Dragging a ghost runs the same rate-constant trim as the bottom edge handle. */}
+                    {md && leftGhostPx > 1.5 && (
+                      <div
+                        className="absolute top-0 cursor-ew-resize rounded-l-sm opacity-25 hover:opacity-45 transition-opacity"
+                        style={{
+                          right: '100%',
+                          width: leftGhostPx,
+                          height: LANE_HEIGHT,
+                          background: `repeating-linear-gradient(45deg, ${color} 0, ${color} 3px, transparent 3px, transparent 7px)`,
+                          border: `1px dashed ${color}`,
+                          borderRight: 'none',
+                        }}
+                        title="Trimmed source — drag to restore"
+                        onMouseDown={(e) => {
+                          e.stopPropagation()
+                          onSelectObject(obj.id)
+                          setDragState({ kind: 'trim-left', objectId: obj.id, startMouseX: e.clientX, originalStartTime: obj.startTime, originalDuration: obj.duration, originalSourceIn: srcIn(md), originalSourceOut: srcOut(md), assetDuration: md.originalDuration })
+                        }}
+                      />
+                    )}
+                    {md && rightGhostPx > 1.5 && (
+                      <div
+                        className="absolute top-0 cursor-ew-resize rounded-r-sm opacity-25 hover:opacity-45 transition-opacity"
+                        style={{
+                          left: '100%',
+                          width: rightGhostPx,
+                          height: LANE_HEIGHT,
+                          background: `repeating-linear-gradient(45deg, ${color} 0, ${color} 3px, transparent 3px, transparent 7px)`,
+                          border: `1px dashed ${color}`,
+                          borderLeft: 'none',
+                        }}
+                        title="Trimmed source — drag to restore"
+                        onMouseDown={(e) => {
+                          e.stopPropagation()
+                          onSelectObject(obj.id)
+                          setDragState({ kind: 'trim-right', objectId: obj.id, startMouseX: e.clientX, originalDuration: obj.duration, originalSourceIn: srcIn(md), originalSourceOut: srcOut(md), assetDuration: md.originalDuration })
+                        }}
+                      />
+                    )}
+
+                    {/* Left edge handle. Media clips (R8) split into speed (top) + trim (bottom);
+                        non-media / narrow clips keep the single speed handle. */}
+                    {splitHandles && md ? (
+                      <>
+                        <div
+                          className="absolute left-0 top-0 w-1.5 h-1/2 cursor-col-resize z-40 hover:bg-white/40"
+                          title="Drag to change speed"
+                          onMouseDown={(e) => {
+                            e.stopPropagation()
+                            onSelectObject(obj.id)
+                            setDragState({ kind: 'resize-left', objectId: obj.id, startMouseX: e.clientX, originalStartTime: obj.startTime, originalDuration: obj.duration })
+                          }}
+                        />
+                        <div
+                          className="absolute left-0 bottom-0 w-1.5 h-1/2 cursor-ew-resize z-40 flex items-center justify-center bg-amber-400/0 group-hover:bg-amber-400/60"
+                          title="Drag to trim in-point (keeps speed)"
+                          onMouseDown={(e) => {
+                            e.stopPropagation()
+                            onSelectObject(obj.id)
+                            setDragState({ kind: 'trim-left', objectId: obj.id, startMouseX: e.clientX, originalStartTime: obj.startTime, originalDuration: obj.duration, originalSourceIn: srcIn(md), originalSourceOut: srcOut(md), assetDuration: md.originalDuration })
+                          }}
+                        >
+                          <span className="text-[9px] text-black font-bold leading-none pointer-events-none opacity-0 group-hover:opacity-100">[</span>
+                        </div>
+                      </>
+                    ) : (
+                      <div
+                        className="absolute left-0 top-0 w-1.5 h-full cursor-col-resize z-40 hover:bg-white/30"
+                        onMouseDown={(e) => {
+                          e.stopPropagation()
+                          onSelectObject(obj.id)
+                          setDragState({ kind: 'resize-left', objectId: obj.id, startMouseX: e.clientX, originalStartTime: obj.startTime, originalDuration: obj.duration })
+                        }}
+                      />
+                    )}
 
                     {/* Main bar body */}
                     <div
                       className="absolute inset-0 rounded-sm overflow-hidden cursor-grab active:cursor-grabbing"
                       style={{
                         backgroundColor: color,
-                        opacity: isSelected ? 1 : 0.75,
-                        outline: isSelected ? '2px solid white' : 'none',
+                        // Hidden clips (spec 14 R11) render dimmed + dashed so the state reads at a glance.
+                        opacity: obj.hidden ? 0.4 : isSelected ? 1 : 0.75,
+                        outline: isSelected ? '2px solid white' : obj.hidden ? '1px dashed rgba(255,255,255,0.6)' : 'none',
                         outlineOffset: -1,
                       }}
                       onMouseDown={(e) => {
@@ -600,6 +761,20 @@ export default function Timeline({
                       })() : null}
                     </div>
 
+                    {/* Hide toggle (spec 14 R11) — revealed on hover; always shown when hidden.
+                        Sits just left of the right resize handle. */}
+                    <button
+                      className={`absolute top-0.5 z-40 flex items-center justify-center rounded text-white hover:bg-black/50 ${obj.hidden ? 'opacity-100 bg-black/30' : 'opacity-0 group-hover:opacity-100'}`}
+                      style={{ right: 11, width: 16, height: 16 }}
+                      title={obj.hidden ? 'Show (H)' : 'Hide (H)'}
+                      onMouseDown={(e) => {
+                        e.stopPropagation()
+                        dispatch({ type: 'UPDATE_OBJECT', objectId: obj.id, updates: { hidden: !obj.hidden } })
+                      }}
+                    >
+                      <EyeIcon off={!!obj.hidden} />
+                    </button>
+
                     {/* Keyframe markers (diamonds on top of the bar), colored to match the
                         panel pips. Drag one horizontally to retime that keyframe. */}
                     {(obj.keyframes ?? []).map((k, i) => {
@@ -637,30 +812,57 @@ export default function Timeline({
                       )
                     })}
 
-                    {/* Right resize handle */}
-                    {(() => {
-                      const isActive = dragState?.kind === 'resize-right' && dragState.objectId === obj.id
-                      return (
-                    <div
-                      className="absolute right-0 top-0 w-2 h-full cursor-col-resize z-40 transition-colors"
-                      style={{
-                        background: isActive ? 'rgba(96,165,250,0.9)' : 'rgba(96,165,250,0.25)',
-                      }}
-                      onMouseEnter={(e) => { if (!dragState) (e.currentTarget.style.background = 'rgba(96,165,250,0.6)') }}
-                      onMouseLeave={(e) => { if (!isActive) (e.currentTarget.style.background = 'rgba(96,165,250,0.25)') }}
-                      onMouseDown={(e) => {
-                        e.stopPropagation()
-                        onSelectObject(obj.id)
-                        setDragState({
-                          kind: 'resize-right',
-                          objectId: obj.id,
-                          startMouseX: e.clientX,
-                          originalDuration: obj.duration,
-                        })
-                      }}
-                    />
-                      )
-                    })()}
+                    {/* Right edge handle. Media clips (R8) split into speed (top) + trim (bottom). */}
+                    {splitHandles && md ? (
+                      <>
+                        {(() => {
+                          const isActive = dragState?.kind === 'resize-right' && dragState.objectId === obj.id
+                          return (
+                            <div
+                              className="absolute right-0 top-0 w-2 h-1/2 cursor-col-resize z-40 transition-colors"
+                              style={{ background: isActive ? 'rgba(96,165,250,0.9)' : 'rgba(96,165,250,0.25)' }}
+                              title="Drag to change speed"
+                              onMouseEnter={(e) => { if (!dragState) (e.currentTarget.style.background = 'rgba(96,165,250,0.6)') }}
+                              onMouseLeave={(e) => { if (!isActive) (e.currentTarget.style.background = 'rgba(96,165,250,0.25)') }}
+                              onMouseDown={(e) => {
+                                e.stopPropagation()
+                                onSelectObject(obj.id)
+                                setDragState({ kind: 'resize-right', objectId: obj.id, startMouseX: e.clientX, originalDuration: obj.duration })
+                              }}
+                            />
+                          )
+                        })()}
+                        <div
+                          className="absolute right-0 bottom-0 w-2 h-1/2 cursor-ew-resize z-40 flex items-center justify-center bg-amber-400/0 group-hover:bg-amber-400/60"
+                          style={dragState?.kind === 'trim-right' && dragState.objectId === obj.id ? { background: 'rgba(251,191,36,0.9)' } : undefined}
+                          title="Drag to trim out-point (keeps speed)"
+                          onMouseDown={(e) => {
+                            e.stopPropagation()
+                            onSelectObject(obj.id)
+                            setDragState({ kind: 'trim-right', objectId: obj.id, startMouseX: e.clientX, originalDuration: obj.duration, originalSourceIn: srcIn(md), originalSourceOut: srcOut(md), assetDuration: md.originalDuration })
+                          }}
+                        >
+                          <span className="text-[9px] text-black font-bold leading-none pointer-events-none opacity-0 group-hover:opacity-100">]</span>
+                        </div>
+                      </>
+                    ) : (
+                      (() => {
+                        const isActive = dragState?.kind === 'resize-right' && dragState.objectId === obj.id
+                        return (
+                          <div
+                            className="absolute right-0 top-0 w-2 h-full cursor-col-resize z-40 transition-colors"
+                            style={{ background: isActive ? 'rgba(96,165,250,0.9)' : 'rgba(96,165,250,0.25)' }}
+                            onMouseEnter={(e) => { if (!dragState) (e.currentTarget.style.background = 'rgba(96,165,250,0.6)') }}
+                            onMouseLeave={(e) => { if (!isActive) (e.currentTarget.style.background = 'rgba(96,165,250,0.25)') }}
+                            onMouseDown={(e) => {
+                              e.stopPropagation()
+                              onSelectObject(obj.id)
+                              setDragState({ kind: 'resize-right', objectId: obj.id, startMouseX: e.clientX, originalDuration: obj.duration })
+                            }}
+                          />
+                        )
+                      })()
+                    )}
                   </div>
                 )
               })}

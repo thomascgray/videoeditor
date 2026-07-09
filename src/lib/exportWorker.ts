@@ -1,7 +1,8 @@
 import type { PhotoData, VideoData, Project } from '../types'
-import type { ExportWorkerRequest, ExportWorkerResponse, RenderedAudio } from './exportWorkerTypes'
+import type { ExportWorkerRequest, ExportWorkerResponse, RenderedAudio, EncodeConfig } from './exportWorkerTypes'
 import { renderFrame } from './renderer'
 import { resolveCamera } from './camera'
+import { sourceTimeAt } from './mediaTiming'
 import { createVideoFrameSource, type VideoFrameSource } from './videoDecoder'
 import { Muxer, ArrayBufferTarget } from 'mp4-muxer'
 
@@ -45,7 +46,7 @@ self.onmessage = async (e: MessageEvent<ExportWorkerRequest>) => {
   if (type !== 'start') return
 
   try {
-    const blob = await runExport(e.data.project, e.data.assetBlobs, e.data.audio)
+    const blob = await runExport(e.data.project, e.data.assetBlobs, e.data.audio, e.data.encode)
     sendMessage({ type: 'done', blob })
   } catch (err) {
     sendMessage({
@@ -64,8 +65,12 @@ async function runExport(
   project: Project,
   assetBlobEntries: Array<[string, Blob]>,
   audio: RenderedAudio | null,
+  encode: EncodeConfig,
 ): Promise<Blob> {
-  const { fps, width, height, objects } = project
+  const { fps, objects } = project
+  // Output dimensions come from the export settings (issue #6), not the project —
+  // renderFrame scales normalized coords + fontSize/lineWidth to whatever we pass.
+  const { width, height, videoBitrate } = encode
   const assetBlobs = new Map(assetBlobEntries)
 
   const totalDuration = objects.reduce(
@@ -82,6 +87,7 @@ async function runExport(
   const videoDecoders = new Map<string, VideoFrameSource>() // keyed by object id (B3)
 
   for (const obj of objects) {
+    if (obj.hidden) continue  // spec 14 R11: hidden clips are never drawn, so skip asset setup
     if (obj.type === 'photo') {
       const assetId = (obj.data as PhotoData).assetId
       if (!imageCache.has(assetId)) {
@@ -119,7 +125,7 @@ async function runExport(
   // and passed in as raw Float32Array channel data
 
   // --- Find a supported H.264 codec ---
-  const codecConfig = await findSupportedVideoCodec(width, height, fps)
+  const codecConfig = await findSupportedVideoCodec(width, height, fps, videoBitrate)
 
   // --- Encode video frames ---
   const videoChunks: StoredVideoChunk[] = []
@@ -141,7 +147,7 @@ async function runExport(
 
   videoEncoder.configure(codecConfig)
 
-  const videoObjects = objects.filter((o) => o.type === 'video')
+  const videoObjects = objects.filter((o) => o.type === 'video' && !o.hidden)
 
   for (let f = 0; f < totalFrames; f++) {
     const globalTime = f / fps
@@ -157,7 +163,7 @@ async function runExport(
       const clipEnd = obj.startTime + obj.duration
       if (globalTime >= clipStart && globalTime < clipEnd) {
         const clipProgress = (globalTime - clipStart) / obj.duration
-        const sourceTime = clipProgress * data.originalDuration
+        const sourceTime = sourceTimeAt(data, clipProgress)
 
         // Frame is owned by the source (valid until the next call); do NOT close it.
         const frame = await decoder.getFrameAtTime(sourceTime)
@@ -313,6 +319,7 @@ async function findSupportedVideoCodec(
   width: number,
   height: number,
   framerate: number,
+  bitrate: number,
 ): Promise<VideoEncoderConfig> {
   // H.264 profiles/levels from high to baseline
   const codecs = [
@@ -329,7 +336,7 @@ async function findSupportedVideoCodec(
       codec,
       width,
       height,
-      bitrate: 8_000_000,
+      bitrate,
       framerate,
     }
 

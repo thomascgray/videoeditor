@@ -62,7 +62,10 @@ function poseInWindow(zoom: CameraZoom, fromPose: CameraState, local: number): C
 export function resolveCamera(zooms: CameraZoom[] | undefined, globalTime: number): CameraState {
   if (!zooms || zooms.length === 0) return IDENTITY_CAMERA
 
-  const sorted = sortZooms(zooms)
+  // Hidden zooms (spec 14 R11.3) are filtered out BEFORE the governing-window sort so an
+  // "invisible" zoom has no chained-from/-to effect on its neighbors.
+  const sorted = sortZooms(zooms.filter((z) => !z.hidden))
+  if (sorted.length === 0) return IDENTITY_CAMERA
 
   // Before the first zoom the camera is at full frame.
   if (globalTime < sorted[0].startTime) return IDENTITY_CAMERA
@@ -132,7 +135,7 @@ export function zoomEnvelope(zoom: CameraZoom): number {
  */
 export function governingZoomAt(zooms: CameraZoom[] | undefined, globalTime: number): CameraZoom | null {
   if (!zooms || zooms.length === 0) return null
-  const sorted = sortZooms(zooms)
+  const sorted = sortZooms(zooms.filter((z) => !z.hidden))
   let gov: CameraZoom | null = null
   for (const z of sorted) {
     if (z.startTime <= globalTime) gov = z

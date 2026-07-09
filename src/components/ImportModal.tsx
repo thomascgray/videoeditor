@@ -212,6 +212,8 @@ export default function ImportModal({
               volume: 1,
               originalDuration: duration,
               waveform,
+              sourceIn: 0,
+              sourceOut: duration,
             },
             {
               startTime: insertAtTime + timeOffset,
@@ -230,6 +232,8 @@ export default function ImportModal({
               assetId: meta.id,
               volume: 1,
               originalDuration: duration,
+              sourceIn: 0,
+              sourceOut: duration,
             },
             {
               startTime: insertAtTime + timeOffset,

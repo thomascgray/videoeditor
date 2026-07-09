@@ -171,6 +171,70 @@ export function drawArrow(
 /** Export curve helpers for use in overlay drawing */
 export { segmentControlPoint, quadBezierAt }
 
+const TEXT_LINE_RATIO = 1.25
+const FIT_MIN_PX = 6
+const FIT_MAX_PX = 400
+
+type WrappedLine = { text: string; paragraphEnd: boolean }
+
+/**
+ * Greedy word-wrap `content` (honoring explicit \n) to `maxWidth` at the ctx's CURRENT font.
+ * `paragraphEnd` marks the last visual line of each \n-delimited paragraph (used to skip
+ * justifying a paragraph's final line). A single word wider than maxWidth is left to overflow.
+ */
+function wrapText(ctx: CanvasRenderingContext2D, content: string, maxWidth: number): WrappedLine[] {
+  const out: WrappedLine[] = []
+  for (const para of content.split('\n')) {
+    const words = para.split(' ')
+    let line = ''
+    for (const word of words) {
+      const candidate = line === '' ? word : `${line} ${word}`
+      if (line !== '' && ctx.measureText(candidate).width > maxWidth) {
+        out.push({ text: line, paragraphEnd: false })
+        line = word
+      } else {
+        line = candidate
+      }
+    }
+    out.push({ text: line, paragraphEnd: true })
+  }
+  return out
+}
+
+/**
+ * Find the largest font size (px) whose wrapped layout fits within maxW × maxH, then return that
+ * size and its wrapped lines. Binary search over integer sizes — ~9 iterations.
+ */
+function fitText(
+  ctx: CanvasRenderingContext2D,
+  content: string,
+  fontOf: (size: number) => string,
+  maxW: number,
+  maxH: number,
+): { fontSize: number; lines: WrappedLine[] } {
+  const fits = (size: number): boolean => {
+    ctx.font = fontOf(size)
+    const lines = wrapText(ctx, content, maxW)
+    let widest = 0
+    for (const l of lines) widest = Math.max(widest, ctx.measureText(l.text).width)
+    return widest <= maxW && lines.length * size * TEXT_LINE_RATIO <= maxH
+  }
+  let lo = FIT_MIN_PX
+  const hi0 = FIT_MAX_PX
+  if (!fits(lo)) {
+    ctx.font = fontOf(lo)
+    return { fontSize: lo, lines: wrapText(ctx, content, maxW) }
+  }
+  let hi = hi0
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2)
+    if (fits(mid)) lo = mid
+    else hi = mid - 1
+  }
+  ctx.font = fontOf(lo)
+  return { fontSize: lo, lines: wrapText(ctx, content, maxW) }
+}
+
 export function drawText(
   ctx: CanvasRenderingContext2D,
   data: TextData,
@@ -182,47 +246,89 @@ export function drawText(
   bh: number,
   scaleFactor: number,
 ) {
-  const fontSize = (style.fontSize ?? 32) * scaleFactor
-  const lineHeight = fontSize * 1.25
+  const full = data.content ?? ''
+  const fontFamily = style.fontFamily ?? 'sans-serif'
+  const fontWeight = style.fontWeight ?? 'bold'
+  const fontStyle = style.fontStyle ?? 'normal'
+  const align = data.align ?? 'center'
+  const autoSize = data.autoSize !== false // default ON: text fills its box
+  const padding = (data.padding ?? 8) * scaleFactor
+  const fontOf = (size: number) => `${fontStyle} ${fontWeight} ${size}px ${fontFamily}`
 
   ctx.save()
   ctx.globalAlpha = style.opacity
-  ctx.font = `${style.fontWeight ?? 'bold'} ${fontSize}px ${style.fontFamily ?? 'sans-serif'}`
   ctx.textBaseline = 'middle'
-  ctx.textAlign = 'center'
+  ctx.textAlign = 'left' // horizontal alignment is done manually so it composes with wrapping/reveal
 
-  const full = data.content ?? ''
-  // Typewriter reveal: round so progress=1 shows the whole string and
-  // progress=0 shows nothing (no whole-word flash on the first frame).
-  const charCount = Math.max(0, Math.min(full.length, Math.round(progress * full.length)))
-  const visibleText = full.substring(0, charCount)
+  const availW = Math.max(1, bw - padding * 2)
+  const availH = Math.max(1, bh - padding * 2)
 
-  const visibleLines = visibleText.split('\n')
-  const x = bx + bw / 2
-  const cy = by + bh / 2
+  // Layout is computed from the FULL text (independent of the reveal), so letters type on in
+  // place without the block reflowing/jumping.
+  let fontSize: number
+  let lines: WrappedLine[]
+  if (autoSize) {
+    ({ fontSize, lines } = fitText(ctx, full, fontOf, availW, availH))
+  } else {
+    fontSize = (style.fontSize ?? 32) * scaleFactor
+    ctx.font = fontOf(fontSize)
+    lines = wrapText(ctx, full, availW)
+  }
+  ctx.font = fontOf(fontSize)
+  const lineHeight = fontSize * TEXT_LINE_RATIO
 
-  // Draw background sized to the FINAL text so the box doesn't grow as
-  // letters type on.
+  const leftX = bx + padding
+  const rightX = bx + bw - padding
+  const centerX = bx + bw / 2
+  const boxCenterY = by + bh / 2
+  const totalH = lines.length * lineHeight
+  const firstLineY = boxCenterY - totalH / 2 + lineHeight / 2
+
+  // Typewriter reveal: round so progress=1 shows everything and progress=0 shows nothing.
+  const totalChars = lines.reduce((s, l) => s + l.text.length, 0)
+  const revealChars = Math.max(0, Math.min(totalChars, Math.round(progress * totalChars)))
+
+  // Background: a snug box around the whole (final) text block, following the alignment.
   if (data.background) {
-    const allLines = full.split('\n')
-    let maxW = 0
-    for (const line of allLines) maxW = Math.max(maxW, ctx.measureText(line).width)
-    const padding = (data.padding ?? 8) * scaleFactor
-    const boxH = allLines.length * lineHeight
+    let minStart = Infinity
+    let maxEnd = -Infinity
+    for (const l of lines) {
+      const w = ctx.measureText(l.text).width
+      const sx = align === 'right' ? rightX - w : align === 'center' ? centerX - w / 2 : leftX
+      minStart = Math.min(minStart, sx)
+      maxEnd = Math.max(maxEnd, sx + w)
+    }
+    if (!isFinite(minStart)) { minStart = leftX; maxEnd = leftX }
     ctx.fillStyle = data.background
-    ctx.fillRect(
-      x - maxW / 2 - padding,
-      cy - boxH / 2 - padding,
-      maxW + padding * 2,
-      boxH + padding * 2,
-    )
+    ctx.fillRect(minStart - padding, boxCenterY - totalH / 2 - padding, maxEnd - minStart + padding * 2, totalH + padding * 2)
   }
 
   ctx.fillStyle = style.color
-  const totalH = (visibleLines.length - 1) * lineHeight
-  const startY = cy - totalH / 2
-  visibleLines.forEach((line, i) => {
-    ctx.fillText(line, x, startY + i * lineHeight)
+  let remaining = revealChars
+  lines.forEach((l, i) => {
+    const y = firstLineY + i * lineHeight
+    const take = Math.max(0, Math.min(remaining, l.text.length))
+    remaining -= l.text.length
+    if (take <= 0) return
+
+    // Justify only fully-revealed, non-final lines that actually have gaps.
+    if (align === 'justify' && !l.paragraphEnd && take >= l.text.length && l.text.includes(' ')) {
+      const words = l.text.split(' ')
+      const wordsWidth = words.reduce((s, w) => s + ctx.measureText(w).width, 0)
+      const gaps = words.length - 1
+      const extra = gaps > 0 ? (rightX - leftX - wordsWidth) / gaps : 0
+      let x = leftX
+      for (const w of words) {
+        ctx.fillText(w, x, y)
+        x += ctx.measureText(w).width + extra
+      }
+      return
+    }
+
+    // Align by the FULL line width so revealing letters stay put; draw the visible substring.
+    const fullWidth = ctx.measureText(l.text).width
+    const sx = align === 'right' ? rightX - fullWidth : align === 'center' ? centerX - fullWidth / 2 : leftX
+    ctx.fillText(l.text.slice(0, take), sx, y)
   })
   ctx.restore()
 }
