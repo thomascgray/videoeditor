@@ -6,6 +6,7 @@ import {
   drawCircle,
   drawFreehand,
 } from './annotations'
+import { resolveRenderPose } from './keyframes'
 
 export type EditorOptions = {
   editorMode?: boolean
@@ -39,11 +40,14 @@ export function renderFrame(
     .filter((obj) => globalTime >= obj.startTime && globalTime < obj.startTime + obj.duration)
     .sort((a, b) => a.lane - b.lane)
 
-  for (const obj of visible) {
-    const elapsed = globalTime - obj.startTime
-    const progress = obj.animateIn > 0
-      ? Math.min(1, elapsed / obj.animateIn)
+  for (const rawObj of visible) {
+    const elapsed = globalTime - rawObj.startTime
+    const progress = rawObj.animateIn > 0
+      ? Math.min(1, elapsed / rawObj.animateIn)
       : 1
+
+    // Resolve keyframes + enter/exit transitions (identity when the object has neither)
+    const obj = resolveRenderPose(rawObj, globalTime)
 
     // Active drawing object: full opacity, no ghost
     if (activeDrawingObjectId === obj.id) {

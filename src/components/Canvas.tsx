@@ -3,6 +3,7 @@ import type { TimelineObject, InteractionMode, ProjectAction, ArrowData, Freehan
 import { useCanvasRenderer } from '../hooks/useCanvasRenderer'
 import type { EditorOptions } from '../lib/renderer'
 import { segmentControlPoint } from '../lib/annotations'
+import { resolvePose, editPose, activeKeyframeIndex, keyframeColor } from '../lib/keyframes'
 
 const ARROW_MAX_POINTS = 10
 
@@ -385,8 +386,22 @@ export default function Canvas({
     oc.height = height
   }, [width, height])
 
-  const selectedObject =
+  const selectedObjectRaw =
     objects.find((o) => o.id === selectedObjectId) ?? null
+  // Overlay, hit-testing and drag operate on the keyframe-resolved pose, so the selection box
+  // follows a keyframed object and dragging edits the rendered position (not a hidden static
+  // base). Enter/exit transitions are intentionally NOT applied here, so the object stays
+  // grabbable at its home position while its entrance/exit plays.
+  const selectedObject = selectedObjectRaw
+    ? resolvePose(selectedObjectRaw, globalTime)
+    : null
+
+  // When the playhead is parked on a keyframe of the selected object, tint the whole selection
+  // overlay with that keyframe's color (and thicken it) so it's unmistakable that edits/drags now
+  // land on that keyframe. Off a keyframe (or un-keyframed), fall back to the default blue.
+  const activeKfIdx = selectedObjectRaw ? activeKeyframeIndex(selectedObjectRaw, globalTime) : -1
+  const selColor = activeKfIdx >= 0 ? keyframeColor(activeKfIdx) : '#4f8ef7'
+  const selWidth = activeKfIdx >= 0 ? 3 : 2
 
   // --- Draw overlay ---
   const drawOverlay = useCallback(() => {
@@ -488,10 +503,25 @@ export default function Canvas({
     }
 
     // Bounding box
-    ctx.strokeStyle = '#4f8ef7'
-    ctx.lineWidth = 2
+    ctx.strokeStyle = selColor
+    ctx.lineWidth = selWidth
     ctx.setLineDash([])
     ctx.strokeRect(bx, by, bw, bh)
+
+    // Keyframe badge: when parked on a keyframe, draw a filled tab in that keyframe's color so
+    // it's unmistakable which keyframe is being edited.
+    if (activeKfIdx >= 0) {
+      const label = `◆ ${activeKfIdx + 1}`
+      ctx.font = 'bold 13px sans-serif'
+      const tabW = ctx.measureText(label).width + 12
+      const tabH = 18
+      ctx.fillStyle = selColor
+      ctx.fillRect(bx, by - tabH, tabW, tabH)
+      ctx.fillStyle = '#ffffff'
+      ctx.textBaseline = 'middle'
+      ctx.textAlign = 'left'
+      ctx.fillText(label, bx + 6, by - tabH / 2 + 1)
+    }
 
     // Resize handles
     const hs = HANDLE_SIZE
@@ -508,7 +538,7 @@ export default function Canvas({
 
     for (const h of handlePositions) {
       ctx.fillStyle = '#ffffff'
-      ctx.strokeStyle = '#4f8ef7'
+      ctx.strokeStyle = selColor
       ctx.lineWidth = 1.5
       ctx.fillRect(h.x - hs / 2, h.y - hs / 2, hs, hs)
       ctx.strokeRect(h.x - hs / 2, h.y - hs / 2, hs, hs)
@@ -519,7 +549,7 @@ export default function Canvas({
     ctx.beginPath()
     ctx.moveTo(bx + bw / 2, by)
     ctx.lineTo(bx + bw / 2, rotY)
-    ctx.strokeStyle = '#4f8ef7'
+    ctx.strokeStyle = selColor
     ctx.lineWidth = 1.5
     ctx.stroke()
 
@@ -527,19 +557,19 @@ export default function Canvas({
     ctx.arc(bx + bw / 2, rotY, 6, 0, Math.PI * 2)
     ctx.fillStyle = '#ffffff'
     ctx.fill()
-    ctx.strokeStyle = '#4f8ef7'
+    ctx.strokeStyle = selColor
     ctx.lineWidth = 1.5
     ctx.stroke()
 
     // Small rotation icon inside the circle
     ctx.beginPath()
     ctx.arc(bx + bw / 2, rotY, 3, -Math.PI * 0.7, Math.PI * 0.5)
-    ctx.strokeStyle = '#4f8ef7'
+    ctx.strokeStyle = selColor
     ctx.lineWidth = 1
     ctx.stroke()
 
     ctx.restore()
-  }, [selectedObject, interactionMode, width, height])
+  }, [selectedObject, interactionMode, width, height, selColor, selWidth, activeKfIdx])
 
   useEffect(() => {
     drawOverlay()
@@ -667,17 +697,20 @@ export default function Canvas({
       const ds = dragStateRef.current
 
       if (ds) {
-        // --- Active drag ---
-        if (ds.kind === 'move') {
+        // --- Active drag --- keyframe-aware: editPose cements a keyframe for a keyframed
+        // property, otherwise edits the static base (see keyframes.ts).
+        const dragObj = selectedObjectRaw
+        const t = dragObj ? globalTime - dragObj.startTime : 0
+        if (dragObj && ds.kind === 'move') {
           dispatch({
             type: 'UPDATE_OBJECT_TRANSIENT',
             objectId: ds.objectId,
-            updates: {
+            updates: editPose(dragObj, {
               x: ds.origX + (nx - ds.startNx),
               y: ds.origY + (ny - ds.startNy),
-            },
+            }, t),
           })
-        } else if (ds.kind === 'resize') {
+        } else if (dragObj && ds.kind === 'resize') {
           const result = computeResize(
             ds.handle,
             nx,
@@ -697,9 +730,9 @@ export default function Canvas({
           dispatch({
             type: 'UPDATE_OBJECT_TRANSIENT',
             objectId: ds.objectId,
-            updates: result,
+            updates: editPose(dragObj, result, t),
           })
-        } else if (ds.kind === 'rotate') {
+        } else if (dragObj && ds.kind === 'rotate') {
           const currentAngle = Math.atan2(
             ny - ds.centerNy,
             nx - ds.centerNx,
@@ -709,7 +742,7 @@ export default function Canvas({
           dispatch({
             type: 'UPDATE_OBJECT_TRANSIENT',
             objectId: ds.objectId,
-            updates: { rotation: newRotation },
+            updates: editPose(dragObj, { rotation: newRotation }, t),
           })
         }
         // Redraw overlay for rubber band during drag in arrow draw mode
@@ -743,7 +776,7 @@ export default function Canvas({
 
       setCursor('default')
     },
-    [interactionMode, selectedObject, width, height, dispatch, drawOverlay],
+    [interactionMode, selectedObject, selectedObjectRaw, width, height, dispatch, drawOverlay, globalTime],
   )
 
   const handleMouseUp = useCallback(() => {
@@ -765,16 +798,19 @@ export default function Canvas({
       const ds = dragStateRef.current
       if (!ds) return
 
-      if (ds.kind === 'move') {
+      const dragObj = objects.find((o) => o.id === ds.objectId)
+      const t = dragObj ? globalTime - dragObj.startTime : 0
+
+      if (dragObj && ds.kind === 'move') {
         dispatch({
           type: 'UPDATE_OBJECT_TRANSIENT',
           objectId: ds.objectId,
-          updates: {
+          updates: editPose(dragObj, {
             x: ds.origX + (nx - ds.startNx),
             y: ds.origY + (ny - ds.startNy),
-          },
+          }, t),
         })
-      } else if (ds.kind === 'resize') {
+      } else if (dragObj && ds.kind === 'resize') {
         const result = computeResize(ds.handle, nx, ny, ds.startNx, ds.startNy, {
           x: ds.origX,
           y: ds.origY,
@@ -785,16 +821,16 @@ export default function Canvas({
         dispatch({
           type: 'UPDATE_OBJECT_TRANSIENT',
           objectId: ds.objectId,
-          updates: result,
+          updates: editPose(dragObj, result, t),
         })
-      } else if (ds.kind === 'rotate') {
+      } else if (dragObj && ds.kind === 'rotate') {
         const currentAngle = Math.atan2(ny - ds.centerNy, nx - ds.centerNx)
         dispatch({
           type: 'UPDATE_OBJECT_TRANSIENT',
           objectId: ds.objectId,
-          updates: {
+          updates: editPose(dragObj, {
             rotation: ds.origRotation + (currentAngle - ds.startAngle),
-          },
+          }, t),
         })
       } else if (ds.kind === 'draw-freehand') {
         const obj = objects.find((o) => o.id === ds.objectId)
@@ -826,7 +862,7 @@ export default function Canvas({
       window.removeEventListener('mousemove', onMove)
       window.removeEventListener('mouseup', onUp)
     }
-  }, [dragState, dispatch, objects, width, height])
+  }, [dragState, dispatch, objects, width, height, globalTime])
 
   // --- Right-click: finish arrow drawing ---
   const handleContextMenu = useCallback(
