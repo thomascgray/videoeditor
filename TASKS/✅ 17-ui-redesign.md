@@ -205,3 +205,6 @@ Static side complete: **clean `tsc -b --force` + `vite build` both green**; no d
 
 ## New files (this task)
 `src/hooks/useUiPrefs.ts`, `src/components/AppearanceControls.tsx`, `src/components/TransportBar.tsx`, `src/components/LeftRail.tsx`, `src/components/ContextToolbar.tsx` (object + zoom toolbars), `src/components/Popover.tsx`, `src/components/propertyControls.tsx` (shared inspector/​popover controls). Deleted: `src/components/AnnotationTools.tsx`.
+
+## Post-completion tweak (2026-07-16)
+Accent is now a **fixed brand red `#e74c3c`** (was a Blue/Teal/Violet/Rose preset picker). `--accent-hover` derives darker via `color-mix(in srgb, var(--accent) 85%, #000)` and `--accent-soft` stays the 14% tint, so all accent shades come off the one red. **Removed the accent picker** — `AppearanceControls` is now just the light/dark toggle; `useUiPrefs` persists only `theme` (drops `accent`/`AccentId`/`ACCENTS`/`setAccent` and clears any legacy `data-accent`); the `[data-accent]` preset rules are gone from `index.css`. `tsc -b` + `vite build` green; grepped `dist/*.css` to confirm `e74c3c` compiled and no `data-accent` rules remain. Files: `src/index.css`, `src/hooks/useUiPrefs.ts`, `src/components/AppearanceControls.tsx`, `src/components/App.tsx`.

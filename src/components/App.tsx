@@ -471,9 +471,7 @@ export default function App() {
           {/* Play / speed / volume / time moved to the floating TransportBar (spec 17 C). */}
           <AppearanceControls
             theme={uiPrefs.theme}
-            accent={uiPrefs.accent}
             onToggleTheme={uiPrefs.toggleTheme}
-            onSetAccent={uiPrefs.setAccent}
           />
           <span className="w-px h-6 bg-border" />
           <button

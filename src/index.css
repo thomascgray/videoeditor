@@ -2,11 +2,10 @@
 
 /* ===== Design tokens (spec 17, workstream T) ================================
    Semantic tokens as CSS custom properties. Light is the default; dark overrides
-   live under [data-theme="dark"] on <html>; the accent swaps under [data-accent].
-   Tailwind v4 `@theme inline` maps these to utilities that resolve the vars at
-   runtime (bg-surface, text-fg, border-border, bg-accent, ...), so theme/accent
-   switch with no rebuild. Un-migrated files still use the stock gray / indigo
-   palette (untouched), so the migration can proceed file-by-file. */
+   live under [data-theme="dark"] on <html>. The accent is a fixed brand red whose
+   lighter/darker shades derive from it via color-mix. Tailwind v4 `@theme inline`
+   maps these to utilities that resolve the vars at runtime (bg-surface, text-fg,
+   border-border, bg-accent, ...), so the theme switches with no rebuild. */
 
 @theme inline {
   --color-bg: var(--bg);
@@ -40,11 +39,11 @@
   --text-muted: #5c6470;    /* secondary text */
   --text-subtle: #8b929e;   /* tertiary text / placeholders */
 
-  /* Accent (default: Blue). Overridden by [data-accent]. */
-  --accent: #2563eb;
-  --accent-hover: #1d4ed8;
-  --accent-contrast: #ffffff;
-  --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
+  /* Accent — a fixed brand red; lighter/darker shades derive from it via color-mix. */
+  --accent: #e74c3c;
+  --accent-hover: color-mix(in srgb, var(--accent) 85%, #000);        /* darker, for hover/active */
+  --accent-contrast: #ffffff;                                         /* text/icons on accent fills */
+  --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);  /* light tint for soft fills */
 
   /* Functional semantics — kept meaningful across themes, never repurposed. */
   --camera: #d97706;        /* camera zoom (spec 13) */
@@ -68,11 +67,6 @@
   --playhead: #f87171;
   --danger: #ef4444;
 }
-
-/* Accent presets (apply in both themes; --accent-soft tracks via color-mix). */
-:root[data-accent="teal"]   { --accent: #0d9488; --accent-hover: #0f766e; }
-:root[data-accent="violet"] { --accent: #7c3aed; --accent-hover: #6d28d9; }
-:root[data-accent="rose"]   { --accent: #e11d48; --accent-hover: #be123c; }
 
 @layer base {
   body {
