@@ -1,16 +1,22 @@
 # Video Editor
 
-A browser-based video editor for creating videos from photos. Import your photos, annotate them with arrows, text, and shapes (each with their own draw-on animations and timing), preview the result in real time, and export as MP4.
+A browser-based open source frvideo editor for creating videos from photos. Import your photos, annotate them with arrows, text, and shapes (each with their own draw-on animations and timing), preview the result in real time, and export as MP4.
 
-Entirely client-side — no server required.
+Entirely client-side - no server required.
+
+
+
+
+https://github.com/user-attachments/assets/6dab07f8-0a02-42c5-8d5c-1d7497161775
+
+
+
 
 ## Tech Stack
 
 - **React + Vite** — TypeScript, fast HMR
 - **Tailwind CSS v4** — utility-first dark theme
 - **Canvas 2D** — native canvas rendering, no abstraction layer
-- **FFmpeg.wasm** — in-browser H.264 MP4 export via `@ffmpeg/ffmpeg` + `@ffmpeg/util`
-- **`useReducer` + context** — action-based state with built-in undo/redo
 
 ## Getting Started
 
