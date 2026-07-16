@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import type { TimelineObject, AssetMeta } from "../types";
 import { createTimelineObject } from "../types";
+import { IconX } from "@tabler/icons-react";
 import {
   storeAsset,
   getMediaDuration,
@@ -278,21 +279,21 @@ export default function ImportModal({
 
   return (
     <div
-      className="fixed inset-0 bg-black/70 flex items-center justify-center z-50"
+      className="fixed inset-0 bg-black/70 flex items-center justify-center z-100"
       onClick={onClose}
     >
       <div
-        className="bg-gray-800 rounded-lg shadow-xl w-[640px] max-w-[90vw] max-h-[85vh] flex flex-col"
+        className="bg-surface rounded-lg shadow-xl w-[640px] max-w-[90vw] max-h-[85vh] flex flex-col"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
-        <div className="flex items-center justify-between p-4 border-b border-gray-700">
-          <h2 className="text-lg font-bold text-white">Add Assets</h2>
+        <div className="flex items-center justify-between p-4 border-b border-border">
+          <h2 className="text-lg font-bold text-fg">Add Assets</h2>
           <button
             onClick={onClose}
-            className="text-gray-400 hover:text-white text-xl leading-none cursor-pointer"
+            className="flex items-center text-muted hover:text-fg cursor-pointer"
           >
-            x
+            <IconX size={20} stroke={2} />
           </button>
         </div>
 
@@ -305,14 +306,14 @@ export default function ImportModal({
             onClick={() => fileInputRef.current?.click()}
             className={`border-2 border-dashed rounded-lg p-8 text-center cursor-pointer transition-colors ${
               isDragging
-                ? "border-indigo-400 bg-indigo-500/10"
-                : "border-gray-600 hover:border-gray-500 hover:bg-gray-700/30"
+                ? "border-accent bg-accent-soft"
+                : "border-border-strong hover:border-border-strong hover:bg-surface-hover"
             }`}
           >
-            <p className="text-gray-300 text-sm font-medium mb-1">
+            <p className="text-muted text-sm font-medium mb-1">
               Drag & drop files here, or click to browse
             </p>
-            <p className="text-gray-500 text-xs">
+            <p className="text-subtle text-xs">
               Images (PNG, JPG, WebP) · Audio (MP3, WAV, OGG) · Video (MP4,
               WebM, MOV)
             </p>
@@ -330,15 +331,15 @@ export default function ImportModal({
         {/* Pending items */}
         {pending.length > 0 && (
           <div className="flex-1 overflow-y-auto px-4 pb-2">
-            <p className="text-xs text-gray-400 mb-2">{summary} ready to import</p>
+            <p className="text-xs text-muted mb-2">{summary} ready to import</p>
             <div className="space-y-1.5">
               {pending.map((item, i) => (
                 <div
                   key={i}
-                  className="flex items-center gap-3 bg-gray-900 rounded p-2 group"
+                  className="flex items-center gap-3 bg-surface-muted rounded p-2 group"
                 >
                   {/* Preview / icon */}
-                  <div className="w-12 h-12 rounded bg-gray-800 flex items-center justify-center shrink-0 overflow-hidden">
+                  <div className="w-12 h-12 rounded bg-surface-hover flex items-center justify-center shrink-0 overflow-hidden">
                     {item.type === "image" && item.previewUrl ? (
                       <img
                         src={item.previewUrl}
@@ -360,15 +361,15 @@ export default function ImportModal({
 
                   {/* Info */}
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm text-white truncate">{item.name}</p>
-                    <div className="flex items-center gap-2 text-xs text-gray-500">
+                    <p className="text-sm text-fg truncate">{item.name}</p>
+                    <div className="flex items-center gap-2 text-xs text-subtle">
                       <span
                         className={`px-1.5 py-0.5 rounded text-[10px] font-medium uppercase ${
                           item.type === "image"
-                            ? "bg-blue-900/50 text-blue-300"
+                            ? "bg-blue-100 text-blue-700"
                             : item.type === "audio"
-                              ? "bg-teal-900/50 text-teal-300"
-                              : "bg-violet-900/50 text-violet-300"
+                              ? "bg-teal-100 text-teal-700"
+                              : "bg-violet-100 text-violet-700"
                         }`}
                       >
                         {item.type}
@@ -380,7 +381,7 @@ export default function ImportModal({
                         {(item.file.size / 1024 / 1024).toFixed(1)} MB
                       </span>
                       {item.sizeWarning && (
-                        <span className="text-amber-400">
+                        <span className="text-amber-600">
                           {item.sizeWarning}
                         </span>
                       )}
@@ -390,9 +391,9 @@ export default function ImportModal({
                   {/* Remove */}
                   <button
                     onClick={() => removeItem(i)}
-                    className="w-6 h-6 text-gray-500 hover:text-red-400 text-sm opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer"
+                    className="w-6 h-6 flex items-center justify-center text-subtle hover:text-danger opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer"
                   >
-                    x
+                    <IconX size={16} stroke={2} />
                   </button>
                 </div>
               ))}
@@ -401,17 +402,17 @@ export default function ImportModal({
         )}
 
         {/* Footer */}
-        <div className="flex items-center justify-end gap-3 p-4 border-t border-gray-700">
+        <div className="flex items-center justify-end gap-3 p-4 border-t border-border">
           <button
             onClick={onClose}
-            className="px-4 py-2 text-sm bg-gray-700 hover:bg-gray-600 text-white rounded transition-colors cursor-pointer"
+            className="px-4 py-2 text-sm bg-surface-muted hover:bg-surface-hover text-fg rounded transition-colors cursor-pointer"
           >
             Cancel
           </button>
           <button
             onClick={handleImport}
             disabled={pending.length === 0 || importing}
-            className="px-4 py-2 text-sm bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-medium rounded transition-colors cursor-pointer"
+            className="px-4 py-2 text-sm bg-accent hover:bg-accent-hover disabled:opacity-40 disabled:cursor-not-allowed text-accent-contrast font-medium rounded transition-colors cursor-pointer"
           >
             {importing
               ? "Importing..."

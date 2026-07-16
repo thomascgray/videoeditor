@@ -2,7 +2,7 @@ import { useEffect, useRef, useCallback } from 'react'
 import type { TimelineObject, PhotoData } from '../types'
 import { renderFrame, loadImage } from '../lib/renderer'
 import { getAssetUrl } from '../lib/assetStore'
-import { getVideoElement } from '../lib/mediaRegistry'
+import { getVideoElement, subscribeVideoReady } from '../lib/mediaRegistry'
 import type { EditorOptions } from '../lib/renderer'
 
 /**
@@ -109,6 +109,11 @@ export function useCanvasRenderer(
     if (isPlaying) return
     doRender()
   }, [isPlaying, globalTime, objects, editorOptions, doRender])
+
+  // Redraw when any video element decodes a paint-worthy frame. Covers the import
+  // case: useAudioPlayback registers the element AFTER this hook's effects run on the
+  // import commit, so we can't attach to the element here — the registry notifies us.
+  useEffect(() => subscribeVideoReady(doRender), [doRender])
 
   // Paused: redraw once a scrub-seek settles on a shared element (nearest frame).
   useEffect(() => {

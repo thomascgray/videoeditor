@@ -1,6 +1,7 @@
-import type { CameraState, CameraZoom } from '../types'
+import type { CameraState, CameraZoom, CameraKeyframe, EasingKind } from '../types'
 import { IDENTITY_CAMERA } from '../types'
 import { ease, lerp } from './easing'
+import { KF_EPS, DEFAULT_EASING } from './keyframes'
 
 /**
  * Camera resolver (spec 13).
@@ -36,20 +37,24 @@ export function sortZooms(zooms: CameraZoom[]): CameraZoom[] {
 /**
  * The pose a single zoom's window produces at `local` seconds past its startTime,
  * given the pose the camera arrives with (`fromPose`, the chain origin for the ease-in).
+ *
+ * The ease-in ramps fromPose → the zoom's FIRST pose; during the hold the camera follows the
+ * keyframed pose path (`zoomPoseAt`, hold-relative); the ease-out ramps the LAST pose → full frame.
+ * A zoom with no keyframes has a constant path (= its base pose), so this is identical to the old
+ * static-hold behavior.
  */
 function poseInWindow(zoom: CameraZoom, fromPose: CameraState, local: number): CameraState {
   if (local < 0) return fromPose
-  const target: CameraState = { x: zoom.x, y: zoom.y, scale: zoom.scale }
   const inEnd = zoom.transitionIn
   const holdEnd = inEnd + zoom.hold
   const outEnd = holdEnd + zoom.transitionOut
 
   if (zoom.transitionIn > 0 && local < inEnd) {
-    return lerpCamera(fromPose, target, ease(zoom.easing, local / zoom.transitionIn))
+    return lerpCamera(fromPose, zoomPoseAt(zoom, 0), ease(zoom.easing, local / zoom.transitionIn))
   }
-  if (local < holdEnd) return target
+  if (local < holdEnd) return zoomPoseAt(zoom, local - inEnd)
   if (zoom.transitionOut > 0 && local < outEnd) {
-    return lerpCamera(target, IDENTITY_CAMERA, ease(zoom.easing, (local - holdEnd) / zoom.transitionOut))
+    return lerpCamera(zoomPoseAt(zoom, zoom.hold), IDENTITY_CAMERA, ease(zoom.easing, (local - holdEnd) / zoom.transitionOut))
   }
   // ease-out complete (or an out-of-window later time): camera has returned to full frame.
   return IDENTITY_CAMERA
@@ -143,4 +148,110 @@ export function governingZoomAt(zooms: CameraZoom[] | undefined, globalTime: num
   }
   if (!gov) return null
   return globalTime <= gov.startTime + zoomEnvelope(gov) ? gov : null
+}
+
+// === Zoom keyframes (pan/scale path within one zoom) ===
+// A thin mirror of the object keyframe engine (keyframes.ts), specialised to the 3-component
+// camera pose {x, y, scale}. Times are relative to the HOLD-segment start (startTime + transitionIn).
+
+/** The zoom's home/base pose (its own x/y/scale) — the t=0 waypoint. */
+function basePose(zoom: CameraZoom): CameraState {
+  return { x: zoom.x, y: zoom.y, scale: zoom.scale }
+}
+
+/** Hold-relative time (seconds past the ease-in) for a global time. Negative during ease-in. */
+export function zoomHoldTime(zoom: CameraZoom, globalTime: number): number {
+  return globalTime - (zoom.startTime + zoom.transitionIn)
+}
+
+/**
+ * The zoom's target pose at hold-relative time `t`, from its base pose + keyframe waypoints.
+ * Un-keyframed → always the base pose (constant). Mirrors keyframes.ts `poseAt`.
+ */
+export function zoomPoseAt(zoom: CameraZoom, t: number): CameraState {
+  const kfs = zoom.keyframes
+  const base = basePose(zoom)
+  if (!kfs || kfs.length === 0) return base
+
+  const wps: { time: number; pose: CameraState; easing: EasingKind }[] =
+    kfs[0].time <= KF_EPS
+      ? kfs.map((k) => ({ time: k.time, pose: k.pose, easing: k.easing }))
+      : [{ time: 0, pose: base, easing: 'linear' as EasingKind }, ...kfs.map((k) => ({ time: k.time, pose: k.pose, easing: k.easing }))]
+
+  if (t <= wps[0].time) return wps[0].pose
+  const last = wps[wps.length - 1]
+  if (t >= last.time) return last.pose
+  for (let i = 0; i < wps.length - 1; i++) {
+    const a = wps[i]
+    const b = wps[i + 1]
+    if (t >= a.time && t <= b.time) {
+      const span = b.time - a.time
+      const u = span > 0 ? (t - a.time) / span : 0
+      return lerpCamera(a.pose, b.pose, ease(b.easing, u)) // easing of the arriving keyframe
+    }
+  }
+  return last.pose
+}
+
+/**
+ * The AUTHORABLE target pose at a global time: `zoomPoseAt` with the hold time clamped to
+ * [0, hold]. This is what the framing rect shows for a selected zoom and what the panel inputs
+ * edit — during the ease-in it reads the home pose, during the ease-out the last pose (not the
+ * blended ramp pose), so what you see is what you edit.
+ */
+export function zoomTargetPoseAt(zoom: CameraZoom, globalTime: number): CameraState {
+  const t = Math.max(0, Math.min(zoom.hold, zoomHoldTime(zoom, globalTime)))
+  return zoomPoseAt(zoom, t)
+}
+
+/** Index of the keyframe the playhead is parked on (within KF_EPS), or -1. */
+export function activeZoomKeyframeIndex(zoom: CameraZoom, globalTime: number): number {
+  const kfs = zoom.keyframes
+  if (!kfs || kfs.length === 0) return -1
+  const t = zoomHoldTime(zoom, globalTime)
+  return kfs.findIndex((k) => Math.abs(k.time - t) < KF_EPS)
+}
+
+type ZoomPoseUpdates = Partial<Pick<CameraZoom, 'x' | 'y' | 'scale' | 'keyframes'>>
+
+/**
+ * Edit pose components at hold-relative `t` so the edit is always concrete (mirrors keyframes.ts
+ * `editPose`): on an existing keyframe → update it; keyframed and past the start → CREATE a
+ * keyframe capturing the current pose + edits; otherwise (un-keyframed, or at the very start) →
+ * move the base/home pose. Un-keyframed zooms never spawn keyframes from a plain edit — press
+ * "+ Keyframe" to start a path, exactly like objects.
+ */
+export function editZoomPose(zoom: CameraZoom, overrides: Partial<CameraState>, t: number): ZoomPoseUpdates {
+  const kfs = zoom.keyframes
+  if (kfs && kfs.length) {
+    const idx = kfs.findIndex((k) => Math.abs(k.time - t) < KF_EPS)
+    if (idx >= 0) {
+      const pose = { ...kfs[idx].pose, ...overrides }
+      return { keyframes: kfs.map((k, j) => (j === idx ? { ...k, pose } : k)) }
+    }
+    if (t > KF_EPS) {
+      const pose = { ...zoomPoseAt(zoom, t), ...overrides }
+      const next = [...kfs, { time: Math.max(0, t), pose, easing: DEFAULT_EASING }]
+      next.sort((a, b) => a.time - b.time)
+      return { keyframes: next }
+    }
+    // else: at the start with no keyframe there → fall through and edit the base pose.
+  }
+  const updates: ZoomPoseUpdates = {}
+  if (overrides.x !== undefined) updates.x = overrides.x
+  if (overrides.y !== undefined) updates.y = overrides.y
+  if (overrides.scale !== undefined) updates.scale = overrides.scale
+  return updates
+}
+
+/** Insert/update a keyframe at hold-relative `t` capturing the current target pose (the "+ Keyframe" button). */
+export function addZoomKeyframeAt(zoom: CameraZoom, t: number): CameraKeyframe[] {
+  const time = Math.max(0, t)
+  const pose = zoomPoseAt(zoom, time)
+  const kfs = zoom.keyframes ? [...zoom.keyframes] : []
+  const idx = kfs.findIndex((k) => Math.abs(k.time - time) < KF_EPS)
+  if (idx >= 0) kfs[idx] = { ...kfs[idx], pose }
+  else kfs.push({ time, pose, easing: DEFAULT_EASING })
+  kfs.sort((a, b) => a.time - b.time)
+  return kfs
 }

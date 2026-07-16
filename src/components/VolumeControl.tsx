@@ -29,12 +29,12 @@ function SpeakerIcon({ muted }: { muted: boolean }) {
 export default function VolumeControl({ volume, isMuted, onVolume, onToggleMute }: VolumeControlProps) {
   const effective = isMuted ? 0 : volume
   return (
-    <div className="flex items-center gap-2 px-2 py-1 bg-gray-800 rounded">
+    <div className="flex items-center gap-2 px-2 py-1 bg-surface-muted rounded">
       <button
         onClick={onToggleMute}
         title={isMuted ? 'Unmute' : 'Mute'}
         className={`flex items-center cursor-pointer transition-colors ${
-          isMuted ? 'text-red-400 hover:text-red-300' : 'text-gray-300 hover:text-white'
+          isMuted ? 'text-danger hover:text-danger' : 'text-muted hover:text-fg'
         }`}
       >
         <SpeakerIcon muted={isMuted || volume === 0} />
@@ -48,7 +48,7 @@ export default function VolumeControl({ volume, isMuted, onVolume, onToggleMute 
         onChange={(e) => onVolume(Number(e.target.value))}
         title={`Volume ${Math.round(effective * 100)}%`}
         aria-label="Volume"
-        className="w-20 h-1 accent-indigo-500 cursor-pointer"
+        className="w-20 h-1 accent-accent cursor-pointer"
       />
     </div>
   )

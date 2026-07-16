@@ -1,5 +1,88 @@
 @import "tailwindcss";
 
-body {
-  margin: 0;
+/* ===== Design tokens (spec 17, workstream T) ================================
+   Semantic tokens as CSS custom properties. Light is the default; dark overrides
+   live under [data-theme="dark"] on <html>; the accent swaps under [data-accent].
+   Tailwind v4 `@theme inline` maps these to utilities that resolve the vars at
+   runtime (bg-surface, text-fg, border-border, bg-accent, ...), so theme/accent
+   switch with no rebuild. Un-migrated files still use the stock gray / indigo
+   palette (untouched), so the migration can proceed file-by-file. */
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-muted: var(--surface-muted);
+  --color-surface-hover: var(--surface-hover);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-fg: var(--text);
+  --color-muted: var(--text-muted);
+  --color-subtle: var(--text-subtle);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-contrast: var(--accent-contrast);
+  --color-accent-soft: var(--accent-soft);
+  --color-camera: var(--camera);
+  --color-playhead: var(--playhead);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+}
+
+:root {
+  /* Light theme (default) */
+  --bg: #e8eaed;            /* window / canvas backdrop */
+  --surface: #ffffff;       /* panels, header, toolbars, timeline */
+  --surface-muted: #eef0f3; /* inputs, insets, subtle fills */
+  --surface-hover: #e0e4ea; /* hover fill on ghost controls (clearly darker than muted) */
+  --border: #e0e2e7;        /* hairline borders / dividers */
+  --border-strong: #c6cad2; /* stronger dividers, hover borders */
+  --text: #1f2328;          /* primary text (near-black grey) */
+  --text-muted: #5c6470;    /* secondary text */
+  --text-subtle: #8b929e;   /* tertiary text / placeholders */
+
+  /* Accent (default: Blue). Overridden by [data-accent]. */
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --accent-contrast: #ffffff;
+  --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
+
+  /* Functional semantics — kept meaningful across themes, never repurposed. */
+  --camera: #d97706;        /* camera zoom (spec 13) */
+  --playhead: #ef4444;      /* timeline playhead */
+  --danger: #dc2626;        /* destructive actions */
+  --danger-soft: color-mix(in srgb, var(--danger) 12%, transparent);
+}
+
+:root[data-theme="dark"] {
+  --bg: #0d0f12;
+  --surface: #16191d;
+  --surface-muted: #1e2228;
+  --surface-hover: #262b32;
+  --border: #2a2f37;
+  --border-strong: #3a414b;
+  --text: #e6e8eb;
+  --text-muted: #9aa1ab;
+  --text-subtle: #6b7280;
+  --accent-contrast: #ffffff;
+  --camera: #f59e0b;
+  --playhead: #f87171;
+  --danger: #ef4444;
+}
+
+/* Accent presets (apply in both themes; --accent-soft tracks via color-mix). */
+:root[data-accent="teal"]   { --accent: #0d9488; --accent-hover: #0f766e; }
+:root[data-accent="violet"] { --accent: #7c3aed; --accent-hover: #6d28d9; }
+:root[data-accent="rose"]   { --accent: #e11d48; --accent-hover: #be123c; }
+
+@layer base {
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+  }
+  /* Theme all native range/checkbox accents at once (replaces scattered accent-* utils). */
+  input[type="range"],
+  input[type="checkbox"] {
+    accent-color: var(--accent);
+  }
 }

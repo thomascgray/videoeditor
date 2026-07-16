@@ -31,12 +31,12 @@ export default function ExportModal({ project, onClose }: ExportModalProps) {
   const duration = totalDurationOf(project)
 
   return (
-    <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
-      <div className="bg-gray-800 rounded-lg shadow-xl p-6 w-[34rem] max-w-[92vw]">
-        <h2 className="text-lg font-bold text-white mb-4">Export Video</h2>
+    <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-100">
+      <div className="bg-surface rounded-lg shadow-xl p-6 w-[34rem] max-w-[92vw]">
+        <h2 className="text-lg font-bold text-fg mb-4">Export Video</h2>
 
         {error && (
-          <div className="mb-4 p-3 bg-red-900/50 border border-red-700 rounded text-red-300 text-sm max-h-32 overflow-y-auto wrap-break-word">
+          <div className="mb-4 p-3 bg-danger-soft border border-danger/30 rounded text-danger text-sm max-h-32 overflow-y-auto wrap-break-word">
             {error}
           </div>
         )}
@@ -51,8 +51,8 @@ export default function ExportModal({ project, onClose }: ExportModalProps) {
         {/* Resolution */}
         <div className="mb-5">
           <div className="flex items-baseline justify-between mb-2">
-            <span className="text-sm font-medium text-gray-200">Resolution</span>
-            <span className="text-xs text-gray-500">
+            <span className="text-sm font-medium text-fg">Resolution</span>
+            <span className="text-xs text-subtle">
               {selectedRes.width} × {selectedRes.height}px
             </span>
           </div>
@@ -73,7 +73,7 @@ export default function ExportModal({ project, onClose }: ExportModalProps) {
 
         {/* Compression */}
         <div className="mb-5">
-          <span className="text-sm font-medium text-gray-200">Compression</span>
+          <span className="text-sm font-medium text-fg">Compression</span>
           <div className="flex flex-wrap gap-2 mt-2">
             {COMPRESSION_PRESETS.map((c) => (
               <ChipButton
@@ -86,25 +86,25 @@ export default function ExportModal({ project, onClose }: ExportModalProps) {
               </ChipButton>
             ))}
           </div>
-          <p className="text-xs text-gray-400 mt-2 leading-relaxed">{selectedComp.blurb}</p>
-          <p className="text-xs text-gray-500 mt-1">Quality does not affect export speed.</p>
+          <p className="text-xs text-muted mt-2 leading-relaxed">{selectedComp.blurb}</p>
+          <p className="text-xs text-subtle mt-1">Quality does not affect export speed.</p>
         </div>
 
         {/* Estimated size */}
-        <div className="flex items-baseline justify-between mb-5 px-3 py-2 bg-gray-900/50 rounded border border-gray-700">
-          <span className="text-sm text-gray-300">Estimated size</span>
-          <span className="text-sm font-semibold text-white">≈ {formatBytes(estBytes)}</span>
+        <div className="flex items-baseline justify-between mb-5 px-3 py-2 bg-surface-muted rounded border border-border">
+          <span className="text-sm text-muted">Estimated size</span>
+          <span className="text-sm font-semibold text-fg">≈ {formatBytes(estBytes)}</span>
         </div>
 
         {isExporting && (
           <div className="mb-4">
-            <div className="w-full bg-gray-700 rounded-full h-3 overflow-hidden">
+            <div className="w-full bg-surface-hover rounded-full h-3 overflow-hidden">
               <div
-                className="bg-indigo-500 h-full transition-all duration-200"
+                className="bg-accent h-full transition-all duration-200"
                 style={{ width: `${Math.round(progress * 100)}%` }}
               />
             </div>
-            <p className="text-xs text-gray-400 mt-1 text-center">
+            <p className="text-xs text-muted mt-1 text-center">
               {progress < 0.95
                 ? `Encoding... ${Math.round(progress * 100)}%`
                 : 'Finalizing...'}
@@ -115,14 +115,14 @@ export default function ExportModal({ project, onClose }: ExportModalProps) {
         <div className="flex gap-3">
           <button
             onClick={isExporting ? cancelExport : onClose}
-            className="flex-1 px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded transition-colors cursor-pointer"
+            className="flex-1 px-4 py-2 bg-surface-muted hover:bg-surface-hover text-fg rounded transition-colors cursor-pointer"
           >
             {isExporting ? 'Cancel export' : 'Close'}
           </button>
           <button
             onClick={() => startExport(project, settings)}
             disabled={isExporting || project.objects.length === 0}
-            className="flex-1 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-medium rounded transition-colors cursor-pointer"
+            className="flex-1 px-4 py-2 bg-accent hover:bg-accent-hover disabled:opacity-50 text-accent-contrast font-medium rounded transition-colors cursor-pointer"
           >
             {isExporting ? 'Exporting...' : 'Export MP4'}
           </button>
@@ -134,9 +134,9 @@ export default function ExportModal({ project, onClose }: ExportModalProps) {
 
 function Fact({ label, value }: { label: string; value: string }) {
   return (
-    <div className="bg-gray-900/40 rounded px-3 py-2">
-      <div className="text-[11px] uppercase tracking-wide text-gray-500">{label}</div>
-      <div className="text-sm text-gray-200 mt-0.5">{value}</div>
+    <div className="bg-surface-muted rounded px-3 py-2">
+      <div className="text-[11px] uppercase tracking-wide text-subtle">{label}</div>
+      <div className="text-sm text-fg mt-0.5">{value}</div>
     </div>
   )
 }
@@ -158,8 +158,8 @@ function ChipButton({
       disabled={disabled}
       className={`px-3 py-2 rounded text-sm font-medium transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-50 ${
         selected
-          ? 'bg-indigo-600/30 text-white ring-2 ring-indigo-500'
-          : 'bg-gray-700 text-gray-300 hover:bg-gray-600 ring-2 ring-transparent'
+          ? 'bg-accent-soft text-accent ring-2 ring-accent'
+          : 'bg-surface-muted text-fg hover:bg-surface-hover ring-2 ring-transparent'
       }`}
     >
       {children}

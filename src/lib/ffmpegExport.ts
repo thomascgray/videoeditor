@@ -1,7 +1,7 @@
 import type { Project, PhotoData, AudioData, VideoData } from '../types'
 import { renderFrame, loadImage } from './renderer'
 import { resolveCamera } from './camera'
-import { clipRate, sourceTimeAt, srcIn, sourceSpan } from './mediaTiming'
+import { clipRate, sourceTimeAt, srcIn, sourceSpan, effectiveVolume } from './mediaTiming'
 import { getAssetUrl, getAssetBlob } from './assetStore'
 import { createVideoFrameSource, type VideoFrameSource } from './videoDecoder'
 import type { ExportWorkerRequest, ExportWorkerResponse, RenderedAudio, EncodeConfig } from './exportWorkerTypes'
@@ -174,7 +174,7 @@ async function prerenderAudioMix(project: Project): Promise<RenderedAudio | null
       source.buffer = decoded
       source.playbackRate.value = clipRate(data, obj.duration)
       const gain = offlineCtx.createGain()
-      gain.gain.value = data.volume
+      gain.gain.value = effectiveVolume(data)
       source.connect(gain)
       gain.connect(offlineCtx.destination)
       // Trim: start at sourceIn, play only the source span (spec 14 R6).
@@ -433,7 +433,7 @@ async function exportWithWebCodecs(
         source.playbackRate.value = clipRate(data, obj.duration)
 
         const gain = offlineCtx.createGain()
-        gain.gain.value = data.volume
+        gain.gain.value = effectiveVolume(data)
 
         source.connect(gain)
         gain.connect(offlineCtx.destination)
@@ -704,7 +704,7 @@ async function exportWithMediaRecorder(
         source.playbackRate.value = clipRate(data, obj.duration)
 
         const gain = offlineCtx.createGain()
-        gain.gain.value = data.volume
+        gain.gain.value = effectiveVolume(data)
 
         source.connect(gain)
         gain.connect(offlineCtx.destination)

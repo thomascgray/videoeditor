@@ -288,19 +288,11 @@ export function drawText(
   const totalChars = lines.reduce((s, l) => s + l.text.length, 0)
   const revealChars = Math.max(0, Math.min(totalChars, Math.round(progress * totalChars)))
 
-  // Background: a snug box around the whole (final) text block, following the alignment.
+  // Background fills the whole object box (its full bbox), not just the glyphs — so it reads as a
+  // solid panel behind the text regardless of the text's length or alignment.
   if (data.background) {
-    let minStart = Infinity
-    let maxEnd = -Infinity
-    for (const l of lines) {
-      const w = ctx.measureText(l.text).width
-      const sx = align === 'right' ? rightX - w : align === 'center' ? centerX - w / 2 : leftX
-      minStart = Math.min(minStart, sx)
-      maxEnd = Math.max(maxEnd, sx + w)
-    }
-    if (!isFinite(minStart)) { minStart = leftX; maxEnd = leftX }
     ctx.fillStyle = data.background
-    ctx.fillRect(minStart - padding, boxCenterY - totalH / 2 - padding, maxEnd - minStart + padding * 2, totalH + padding * 2)
+    ctx.fillRect(bx, by, bw, bh)
   }
 
   ctx.fillStyle = style.color

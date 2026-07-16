@@ -1,0 +1,173 @@
+import { useState, type ComponentType } from 'react'
+import type { TimelineObjectType, AssetMeta } from '../types'
+import { getAssetUrl } from '../lib/assetStore'
+import {
+  IconPhoto, IconTypography, IconShape, IconZoomScan,
+  IconArrowUpRight, IconScribble, IconPhotoPlus, IconMusic,
+  IconChevronLeft, IconChevronRight, type IconProps,
+} from '@tabler/icons-react'
+
+type TablerIcon = ComponentType<IconProps>
+type RailSection = 'media' | 'text' | 'elements' | 'zoom'
+
+type LeftRailProps = {
+  assets: AssetMeta[]
+  onAddMedia: () => void                    // open the import flow (modal)
+  onAddAsset: (assetId: string) => void     // re-add an already-imported asset
+  onCreateObject: (type: TimelineObjectType) => void
+  onCreateZoom: () => void
+}
+
+const SECTIONS: { id: RailSection; label: string; Icon: TablerIcon }[] = [
+  { id: 'media', label: 'Media', Icon: IconPhoto },
+  { id: 'text', label: 'Text', Icon: IconTypography },
+  { id: 'elements', label: 'Elements', Icon: IconShape },
+  { id: 'zoom', label: 'Zoom', Icon: IconZoomScan },
+]
+
+/**
+ * Left creation + asset rail (spec 17 L): a vertical icon rail of sections + a content pane.
+ * Subsumes the old header creation clusters and the "+ Asset" trigger, and adds a basic re-addable
+ * media library. Collapsible to just the icon rail. Ephemeral view-state (not persisted).
+ */
+export default function LeftRail({ assets, onAddMedia, onAddAsset, onCreateObject, onCreateZoom }: LeftRailProps) {
+  const [section, setSection] = useState<RailSection>('media')
+  const [open, setOpen] = useState(true)
+
+  const selectSection = (s: RailSection) => {
+    if (s === section && open) setOpen(false)   // click the active section to collapse
+    else { setSection(s); setOpen(true) }
+  }
+
+  return (
+    <div className="flex h-full shrink-0 bg-surface border-r border-border">
+      {/* Icon rail */}
+      <div className="flex flex-col items-center w-13 py-2 border-r border-border shrink-0">
+        {SECTIONS.map(({ id, label, Icon }) => {
+          const active = section === id && open
+          return (
+            <button
+              key={id}
+              onClick={() => selectSection(id)}
+              title={label}
+              className={`relative flex flex-col items-center gap-0.5 w-full py-2 text-[9px] cursor-pointer transition-colors ${
+                active ? 'text-accent' : 'text-muted hover:text-fg'
+              }`}
+            >
+              {active && <span className="absolute left-0 top-1 bottom-1 w-0.5 rounded-r bg-accent" />}
+              <Icon size={20} stroke={1.8} />
+              {label}
+            </button>
+          )
+        })}
+        <button
+          onClick={() => setOpen((o) => !o)}
+          title={open ? 'Collapse panel' : 'Expand panel'}
+          className="mt-auto flex items-center justify-center w-full py-2 text-subtle hover:text-fg cursor-pointer transition-colors"
+        >
+          {open ? <IconChevronLeft size={16} stroke={2} /> : <IconChevronRight size={16} stroke={2} />}
+        </button>
+      </div>
+
+      {/* Content pane */}
+      {open && (
+        <div className="w-52 flex flex-col overflow-y-auto shrink-0">
+          {section === 'media' && (
+            <MediaSection assets={assets} onAddMedia={onAddMedia} onAddAsset={onAddAsset} />
+          )}
+          {section === 'text' && (
+            <SimpleSection title="Text" items={[
+              { label: 'Add text box', Icon: IconTypography, onClick: () => onCreateObject('text') },
+            ]} />
+          )}
+          {section === 'elements' && (
+            <SimpleSection title="Elements" items={[
+              { label: 'Arrow', Icon: IconArrowUpRight, onClick: () => onCreateObject('arrow') },
+              { label: 'Pen', Icon: IconScribble, onClick: () => onCreateObject('freehand') },
+            ]} />
+          )}
+          {section === 'zoom' && (
+            <SimpleSection title="Animations" items={[
+              { label: 'Camera zoom', Icon: IconZoomScan, onClick: onCreateZoom },
+            ]} />
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function MediaSection({ assets, onAddMedia, onAddAsset }: {
+  assets: AssetMeta[]
+  onAddMedia: () => void
+  onAddAsset: (assetId: string) => void
+}) {
+  return (
+    <div className="p-3 flex flex-col gap-3">
+      <button
+        onClick={onAddMedia}
+        className="flex items-center justify-center gap-1.5 w-full py-2 text-sm font-medium bg-accent text-accent-contrast rounded-lg hover:bg-accent-hover cursor-pointer transition-colors"
+      >
+        <IconPhotoPlus size={16} stroke={2} /> Add media
+      </button>
+
+      {assets.length === 0 ? (
+        <p className="text-[11px] text-subtle text-center px-2 py-4 leading-relaxed">
+          Imported media appears here — click to reuse it anywhere on the timeline.
+        </p>
+      ) : (
+        <div className="grid grid-cols-2 gap-2">
+          {assets.map((a) => (
+            <AssetThumb key={a.id} asset={a} onClick={() => onAddAsset(a.id)} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function AssetThumb({ asset, onClick }: { asset: AssetMeta; onClick: () => void }) {
+  const url = asset.type !== 'audio' ? getAssetUrl(asset.id) : undefined
+  return (
+    <button
+      onClick={onClick}
+      title={`Add ${asset.filename}`}
+      className="group relative aspect-square rounded-md overflow-hidden bg-surface-muted border border-border hover:border-accent cursor-pointer transition-colors"
+    >
+      {asset.type === 'image' && url ? (
+        <img src={url} alt={asset.filename} className="w-full h-full object-cover" />
+      ) : asset.type === 'video' && url ? (
+        <video src={url} className="w-full h-full object-cover" muted />
+      ) : (
+        <span className="w-full h-full flex items-center justify-center text-subtle">
+          <IconMusic size={22} stroke={1.8} />
+        </span>
+      )}
+      <span className="absolute inset-x-0 bottom-0 px-1 py-0.5 text-[9px] text-white bg-black/55 truncate text-left">
+        {asset.filename}
+      </span>
+    </button>
+  )
+}
+
+function SimpleSection({ title, items }: {
+  title: string
+  items: { label: string; Icon: TablerIcon; onClick: () => void }[]
+}) {
+  return (
+    <div className="p-3">
+      <h3 className="text-[10px] font-semibold text-subtle uppercase tracking-wider mb-2 px-1">{title}</h3>
+      <div className="flex flex-col gap-1.5">
+        {items.map(({ label, Icon, onClick }) => (
+          <button
+            key={label}
+            onClick={onClick}
+            className="flex items-center gap-2.5 w-full px-3 py-2.5 text-sm text-fg bg-surface-muted hover:bg-surface-hover rounded-lg cursor-pointer transition-colors"
+          >
+            <Icon size={18} stroke={1.8} /> {label}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}

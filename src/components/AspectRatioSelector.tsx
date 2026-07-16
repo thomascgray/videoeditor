@@ -26,7 +26,7 @@ function RatioGlyph({ width, height, active }: { width: number; height: number; 
   return (
     <span className="inline-flex items-center justify-center w-5 h-5 shrink-0">
       <span
-        className={`block rounded-xs border ${active ? 'border-indigo-400 bg-indigo-500/30' : 'border-gray-500'}`}
+        className={`block rounded-xs border ${active ? 'border-accent bg-accent-soft' : 'border-border-strong'}`}
         style={{ width: w, height: h }}
       />
     </span>
@@ -89,20 +89,20 @@ export default function AspectRatioSelector({ width, height, dispatch }: AspectR
       <button
         onClick={toggle}
         title="Canvas size / aspect ratio"
-        className="flex items-center gap-1.5 px-2 py-1 text-xs text-gray-300 bg-gray-800 hover:bg-gray-700 rounded transition-colors cursor-pointer"
+        className="flex items-center gap-1.5 px-2 py-1 text-xs text-fg bg-surface-muted hover:bg-surface-hover rounded transition-colors cursor-pointer"
       >
         <RatioGlyph width={width} height={height} />
         <span className="font-medium tabular-nums">{active ? active.ratio : formatRatio(width, height)}</span>
-        <svg width="8" height="8" viewBox="0 0 10 6" className="text-gray-500">
+        <svg width="8" height="8" viewBox="0 0 10 6" className="text-subtle">
           <path d="M1 1l4 4 4-4" stroke="currentColor" strokeWidth="1.5" fill="none" />
         </svg>
       </button>
 
       {open && (
-        <div className="absolute left-0 top-full mt-1 w-64 bg-gray-800 border border-gray-700 rounded-lg shadow-xl z-50 py-1.5">
+        <div className="absolute left-0 top-full mt-1 w-64 bg-surface border border-border rounded-lg shadow-xl z-50 py-1.5">
           {GROUP_ORDER.map((group) => (
             <div key={group}>
-              <div className="px-3 pt-1.5 pb-0.5 text-[9px] uppercase tracking-wider text-gray-500">
+              <div className="px-3 pt-1.5 pb-0.5 text-[9px] uppercase tracking-wider text-subtle">
                 {GROUP_LABELS[group]}
               </div>
               {ASPECT_PRESETS.filter((p) => p.group === group).map((p) => {
@@ -112,19 +112,19 @@ export default function AspectRatioSelector({ width, height, dispatch }: AspectR
                     key={p.id}
                     onClick={() => applyPreset(p)}
                     className={`w-full flex items-center gap-2.5 px-3 py-1.5 text-left transition-colors cursor-pointer ${
-                      isActive ? 'bg-indigo-600/20' : 'hover:bg-gray-700/60'
+                      isActive ? 'bg-accent-soft' : 'hover:bg-surface-hover'
                     }`}
                   >
                     <RatioGlyph width={p.width} height={p.height} active={isActive} />
                     <span className="flex-1 min-w-0">
                       <span className="flex items-baseline gap-1.5">
-                        <span className={`text-xs font-medium ${isActive ? 'text-indigo-300' : 'text-gray-200'}`}>{p.label}</span>
-                        <span className="text-[10px] text-gray-500 tabular-nums">{p.ratio}</span>
+                        <span className={`text-xs font-medium ${isActive ? 'text-accent' : 'text-fg'}`}>{p.label}</span>
+                        <span className="text-[10px] text-subtle tabular-nums">{p.ratio}</span>
                       </span>
-                      {p.hint && <span className="block text-[10px] text-gray-500 truncate">{p.hint}</span>}
+                      {p.hint && <span className="block text-[10px] text-subtle truncate">{p.hint}</span>}
                     </span>
                     {isActive && (
-                      <svg width="12" height="12" viewBox="0 0 12 12" className="text-indigo-400 shrink-0">
+                      <svg width="12" height="12" viewBox="0 0 12 12" className="text-accent shrink-0">
                         <path d="M2 6l3 3 5-6" stroke="currentColor" strokeWidth="1.6" fill="none" />
                       </svg>
                     )}
@@ -135,8 +135,8 @@ export default function AspectRatioSelector({ width, height, dispatch }: AspectR
           ))}
 
           {/* Custom entry */}
-          <div className="border-t border-gray-700 mt-1 pt-2 px-3 pb-1">
-            <div className="text-[9px] uppercase tracking-wider text-gray-500 mb-1.5">Custom</div>
+          <div className="border-t border-border mt-1 pt-2 px-3 pb-1">
+            <div className="text-[9px] uppercase tracking-wider text-subtle mb-1.5">Custom</div>
             <div className="flex items-center gap-1.5">
               <input
                 type="number"
@@ -145,10 +145,10 @@ export default function AspectRatioSelector({ width, height, dispatch }: AspectR
                 max={MAX_DIMENSION}
                 onChange={(e) => setCustomW(e.target.value)}
                 onKeyDown={(e) => { if (e.key === 'Enter') applyCustom() }}
-                className="w-full bg-gray-900 text-white text-xs px-2 py-1 rounded border border-gray-700 focus:border-indigo-500 outline-none tabular-nums"
+                className="w-full bg-surface-muted text-fg text-xs px-2 py-1 rounded border border-border focus:border-accent outline-none tabular-nums"
                 aria-label="Custom width"
               />
-              <span className="text-gray-500 text-xs">×</span>
+              <span className="text-subtle text-xs">×</span>
               <input
                 type="number"
                 value={customH}
@@ -156,17 +156,17 @@ export default function AspectRatioSelector({ width, height, dispatch }: AspectR
                 max={MAX_DIMENSION}
                 onChange={(e) => setCustomH(e.target.value)}
                 onKeyDown={(e) => { if (e.key === 'Enter') applyCustom() }}
-                className="w-full bg-gray-900 text-white text-xs px-2 py-1 rounded border border-gray-700 focus:border-indigo-500 outline-none tabular-nums"
+                className="w-full bg-surface-muted text-fg text-xs px-2 py-1 rounded border border-border focus:border-accent outline-none tabular-nums"
                 aria-label="Custom height"
               />
               <button
                 onClick={applyCustom}
-                className="px-2.5 py-1 text-xs bg-indigo-600 hover:bg-indigo-500 text-white rounded transition-colors cursor-pointer shrink-0"
+                className="px-2.5 py-1 text-xs bg-accent hover:bg-accent-hover text-accent-contrast rounded transition-colors cursor-pointer shrink-0"
               >
                 Set
               </button>
             </div>
-            <div className="text-[10px] text-gray-500 mt-1 tabular-nums">
+            <div className="text-[10px] text-subtle mt-1 tabular-nums">
               {formatRatio(Number(customW) || 0, Number(customH) || 0)} · {MIN_DIMENSION}–{MAX_DIMENSION}px, even
             </div>
           </div>
