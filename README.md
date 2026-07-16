@@ -1,16 +1,12 @@
 # Video Editor
 
-A browser-based open source frvideo editor for creating videos from photos. Import your photos, annotate them with arrows, text, and shapes (each with their own draw-on animations and timing), preview the result in real time, and export as MP4.
+### A browser-based, open source, free to use video editor. Imports photos, video clips, annotate them with arrows and text and zooms. Preview the video in real time. Export to MP4.
 
-Entirely client-side - no server required.
+### Try it right now at https://video.tomg.cool/
 
+https://github.com/user-attachments/assets/b078db2a-b289-4c58-b6ba-dfc386c7d952
 
-
-
-https://github.com/user-attachments/assets/6dab07f8-0a02-42c5-8d5c-1d7497161775
-
-
-
+---
 
 ## Tech Stack
 
