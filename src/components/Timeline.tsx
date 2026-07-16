@@ -3,6 +3,7 @@ import type { TimelineObject, ProjectAction, AudioData, VideoData, CameraZoom } 
 import { keyframeColor } from '../lib/keyframes'
 import { zoomEnvelope } from '../lib/camera'
 import { sourceSpan, srcIn, srcOut } from '../lib/mediaTiming'
+import { IconChevronDown, IconPlus, IconX, IconViewfinder, IconEye, IconEyeOff } from '@tabler/icons-react'
 
 type TimelineProps = {
   objects: TimelineObject[]
@@ -25,13 +26,10 @@ const LANE_GAP = 2
 const RULER_HEIGHT = 24
 const CAMERA_TRACK_HEIGHT = 32
 const GUTTER_WIDTH = 32
-const MIN_PIXELS_PER_SECOND = 20
+const MIN_PIXELS_PER_SECOND = 2
 const MAX_PIXELS_PER_SECOND = 400
 const DEFAULT_PIXELS_PER_SECOND = 80
 const TIMELINE_PADDING_SECONDS = 5
-// Below this bar width, an audio/video clip is too narrow to safely split the edge handle
-// into speed (top) + trim (bottom) halves, so it falls back to a single speed handle (R8).
-const SPLIT_HANDLE_MIN_WIDTH = 28
 const ZOOM_COLOR = '#f59e0b' // amber — matches the canvas framing rect + zoom panel
 
 const formatTime = (seconds: number): string => {
@@ -68,21 +66,12 @@ type DragState =
   | { kind: 'zoom-move'; zoomId: string; startMouseX: number; originalStartTime: number }
   | { kind: 'zoom-resize-right'; zoomId: string; startMouseX: number; originalHold: number }
   | { kind: 'zoom-resize-left'; zoomId: string; startMouseX: number; originalStartTime: number; originalHold: number }
+  // Retime a single pan/scale keyframe within a zoom's hold (clamped between neighbors, [0, hold]).
+  | { kind: 'zoom-move-keyframe'; zoomId: string; kfIndex: number; startMouseX: number; originalTime: number; minTime: number; maxTime: number }
 
-/** Feather-style eye / eye-off glyph for the hide toggle (spec 14 R11). */
+/** Eye / eye-off glyph for the hide toggle (spec 14 R11). */
 function EyeIcon({ off }: { off: boolean }) {
-  return off ? (
-    <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <path d="M9.9 4.24A9.1 9.1 0 0 1 12 4c7 0 10 8 10 8a13.2 13.2 0 0 1-1.67 2.68M6.6 6.6A13.5 13.5 0 0 0 2 12s3 8 10 8a9.7 9.7 0 0 0 5.4-1.6" />
-      <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" />
-      <line x1="2" y1="2" x2="22" y2="22" />
-    </svg>
-  ) : (
-    <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <path d="M2 12s3-8 10-8 10 8 10 8-3 8-10 8-10-8-10-8z" />
-      <circle cx="12" cy="12" r="3" />
-    </svg>
-  )
+  return off ? <IconEyeOff size={12} stroke={2.2} /> : <IconEye size={12} stroke={2.2} />
 }
 
 export default function Timeline({
@@ -226,15 +215,9 @@ export default function Timeline({
           dragState.originalStartTime + dt,
         ))
         const newStart = Math.round(rawStart * 10) / 10
-        let newDuration = Math.round((dragState.originalStartTime + dragState.originalDuration - newStart) * 10) / 10
+        // Only non-media objects reach resize-left now (media edges trim instead), so no rate clamp.
+        const newDuration = Math.round((dragState.originalStartTime + dragState.originalDuration - newStart) * 10) / 10
         const obj = objects.find((o) => o.id === dragState.objectId)
-        // Clamp duration for audio/video to respect 0.25x–4x playback rate. Speed-drag keeps the
-        // source span fixed, so the clamp is [span/4, span*4] (== originalDuration for an untrimmed
-        // clip, so this is behavior-identical to before for existing projects).
-        if (obj && (obj.type === 'audio' || obj.type === 'video')) {
-          const span = sourceSpan(obj.data as AudioData | VideoData)
-          newDuration = Math.max(span / 4, Math.min(span * 4, newDuration))
-        }
         const clampedAnimateIn = obj ? Math.min(obj.animateIn, newDuration) : undefined
         dispatch({
           type: 'UPDATE_OBJECT',
@@ -242,15 +225,9 @@ export default function Timeline({
           updates: { startTime: newStart, duration: newDuration, ...(clampedAnimateIn !== undefined && { animateIn: clampedAnimateIn }) },
         })
       } else if (dragState.kind === 'resize-right') {
-        let newDuration = Math.round(Math.max(0.1, dragState.originalDuration + dt) * 10) / 10
+        // Only non-media objects reach resize-right now (media edges trim instead), so no rate clamp.
+        const newDuration = Math.round(Math.max(0.1, dragState.originalDuration + dt) * 10) / 10
         const obj = objects.find((o) => o.id === dragState.objectId)
-        // Clamp duration for audio/video to respect 0.25x–4x playback rate. Speed-drag keeps the
-        // source span fixed, so the clamp is [span/4, span*4] (== originalDuration for an untrimmed
-        // clip, so this is behavior-identical to before for existing projects).
-        if (obj && (obj.type === 'audio' || obj.type === 'video')) {
-          const span = sourceSpan(obj.data as AudioData | VideoData)
-          newDuration = Math.max(span / 4, Math.min(span * 4, newDuration))
-        }
         const clampedAnimateIn = obj ? Math.min(obj.animateIn, newDuration) : undefined
         dispatch({
           type: 'UPDATE_OBJECT',
@@ -327,6 +304,18 @@ export default function Timeline({
         const newStart = Math.round((dragState.originalStartTime + clampedDt) * 10) / 10
         const newHold = Math.round((dragState.originalHold - clampedDt) * 10) / 10
         dispatch({ type: 'UPDATE_ZOOM_TRANSIENT', zoomId: dragState.zoomId, updates: { startTime: newStart, hold: newHold } })
+      } else if (dragState.kind === 'zoom-move-keyframe') {
+        // Retime one pan/scale keyframe; clamped between neighbors so the order never flips.
+        const raw = dragState.originalTime + dt
+        const t = Math.round(Math.max(dragState.minTime, Math.min(dragState.maxTime, raw)) * 100) / 100
+        const zoom = (zooms ?? []).find((z) => z.id === dragState.zoomId)
+        if (zoom?.keyframes) {
+          dispatch({
+            type: 'UPDATE_ZOOM_TRANSIENT',
+            zoomId: dragState.zoomId,
+            updates: { keyframes: zoom.keyframes.map((k, j) => (j === dragState.kfIndex ? { ...k, time: t } : k)) },
+          })
+        }
       }
     }
 
@@ -334,7 +323,8 @@ export default function Timeline({
       if (
         dragState.kind === 'move' || dragState.kind === 'move-keyframe' ||
         dragState.kind === 'trim-left' || dragState.kind === 'trim-right' ||
-        dragState.kind === 'zoom-move' || dragState.kind === 'zoom-resize-right' || dragState.kind === 'zoom-resize-left'
+        dragState.kind === 'zoom-move' || dragState.kind === 'zoom-resize-right' || dragState.kind === 'zoom-resize-left' ||
+        dragState.kind === 'zoom-move-keyframe'
       ) {
         dispatch({ type: 'COMMIT_TRANSIENT' })
       }
@@ -347,11 +337,18 @@ export default function Timeline({
       window.removeEventListener('mousemove', handleMouseMove)
       window.removeEventListener('mouseup', handleMouseUp)
     }
-  }, [dragState, pixelsPerSecond, dispatch, onSeek, minLane, maxLane, objects])
+  }, [dragState, pixelsPerSecond, dispatch, onSeek, minLane, maxLane, objects, zooms])
 
   // Render ruler ticks
   const ticks: { time: number; label: string; major: boolean }[] = []
-  const tickInterval = pixelsPerSecond >= 100 ? 1 : pixelsPerSecond >= 40 ? 2 : 5
+  // Keep labels from crowding as you zoom out: widen the tick interval at lower px/s.
+  const tickInterval =
+    pixelsPerSecond >= 100 ? 1 :
+    pixelsPerSecond >= 40 ? 2 :
+    pixelsPerSecond >= 20 ? 5 :
+    pixelsPerSecond >= 10 ? 10 :
+    pixelsPerSecond >= 5 ? 30 :
+    60
   for (let t = 0; t <= viewDuration; t += tickInterval) {
     ticks.push({ time: t, label: `${t}s`, major: t % (tickInterval * 2) === 0 })
   }
@@ -365,7 +362,7 @@ export default function Timeline({
   }
 
   return (
-    <div className="h-full bg-gray-900 border-t border-gray-700 select-none flex flex-col">
+    <div className="h-full bg-surface border-t border-border select-none flex flex-col isolate">
       {/* Single scroll container drives BOTH axes (spec 16 A): horizontal time-scroll + vertical
           lane-scroll. Ruler + Camera track are pinned via sticky-top (frozen header) and the lane
           gutter via sticky-left (frozen column), so adding lanes scrolls instead of squishing the render. */}
@@ -377,38 +374,38 @@ export default function Timeline({
           {/* Lane gutter — frozen to the left (sticky). Its top two cells (collapse + Camera label)
               are also sticky-top so they stay aligned with the pinned ruler/Camera track. z-[70] keeps
               it above every scrolling bar child (bars use up to z-50) so nothing bleeds over it. */}
-          <div className="sticky left-0 z-[70] flex-shrink-0 flex flex-col bg-gray-900" style={{ width: GUTTER_WIDTH }}>
+          <div className="sticky left-0 z-[70] flex-shrink-0 flex flex-col bg-surface" style={{ width: GUTTER_WIDTH }}>
             {/* Collapse chevron — pinned (sticky top) with the ruler (spec 16 B3) */}
             <button
               onClick={onCollapse}
-              className="sticky top-0 z-10 w-full flex items-center justify-center bg-gray-800 border-b border-r border-gray-700 text-gray-500 hover:text-white transition-colors cursor-pointer"
+              className="sticky top-0 z-10 w-full flex items-center justify-center bg-surface-muted border-b border-r border-border text-subtle hover:text-fg transition-colors cursor-pointer"
               style={{ height: RULER_HEIGHT }}
               title="Collapse timeline"
             >
-              <span className="text-[10px] leading-none">▾</span>
+              <IconChevronDown size={14} stroke={2} />
             </button>
 
             {/* Camera track label — pinned (sticky) below the ruler (spec 13) */}
             <div
-              className="sticky z-10 w-full flex items-center justify-center border-b border-r border-gray-700 text-amber-500 bg-gray-900"
+              className="sticky z-10 w-full flex items-center justify-center border-b border-r border-border text-camera bg-surface"
               style={{ height: CAMERA_TRACK_HEIGHT, top: RULER_HEIGHT }}
               title="Camera zooms"
             >
-              <span className="text-sm leading-none">⛶</span>
+              <IconViewfinder size={15} stroke={2} />
             </div>
 
             {/* Add lane above CTA (dedicated blank lane row) */}
             <button
               onClick={handleAddLaneAbove}
-              className="w-full flex items-center justify-center border-r border-gray-800 text-gray-500 hover:text-blue-400 hover:bg-blue-500/10 transition-colors cursor-pointer"
+              className="w-full flex items-center justify-center border-r border-border text-subtle hover:text-accent hover:bg-accent-soft transition-colors cursor-pointer"
               style={{ height: LANE_HEIGHT }}
               title="Add lane above"
             >
-              <span className="text-sm font-bold leading-none">+</span>
+              <IconPlus size={15} stroke={2.5} />
             </button>
 
             {/* Lane controls */}
-            <div className="relative border-r border-gray-800" style={{ height: trackHeight }}>
+            <div className="relative border-r border-border" style={{ height: trackHeight }}>
               {/* Per-lane remove buttons */}
               {lanes.map((lane) => {
                 const y = laneToY(lane)
@@ -418,11 +415,11 @@ export default function Timeline({
                     key={lane}
                     onClick={() => handleRemoveLane(lane)}
                     disabled={laneCount <= 1}
-                    className="absolute left-0 w-full flex items-center justify-center text-gray-600 hover:text-red-400 hover:bg-red-500/10 disabled:opacity-0 disabled:pointer-events-none transition-colors cursor-pointer"
+                    className="absolute left-0 w-full flex items-center justify-center text-subtle hover:text-danger hover:bg-danger-soft disabled:opacity-0 disabled:pointer-events-none transition-colors cursor-pointer"
                     style={{ top: y, height: LANE_HEIGHT }}
                     title={hasObjects ? 'Remove lane (objects move up)' : 'Remove empty lane'}
                   >
-                    <span className="text-sm leading-none">&times;</span>
+                    <IconX size={14} stroke={2} />
                   </button>
                 )
               })}
@@ -431,11 +428,11 @@ export default function Timeline({
             {/* Add lane below CTA (dedicated blank lane row) */}
             <button
               onClick={handleAddLaneBelow}
-              className="w-full flex items-center justify-center border-r border-gray-800 text-gray-500 hover:text-blue-400 hover:bg-blue-500/10 transition-colors cursor-pointer"
+              className="w-full flex items-center justify-center border-r border-border text-subtle hover:text-accent hover:bg-accent-soft transition-colors cursor-pointer"
               style={{ height: LANE_HEIGHT }}
               title="Add lane below"
             >
-              <span className="text-sm font-bold leading-none">+</span>
+              <IconPlus size={15} stroke={2.5} />
             </button>
           </div>
 
@@ -444,7 +441,7 @@ export default function Timeline({
             {/* Ruler (pinned top) — z-[60] sits above scrolling bar children (≤ z-50) so lanes
                 scrolling underneath are hidden by the opaque ruler. */}
             <div
-              className="sticky top-0 z-[60] bg-gray-800 border-b border-gray-700 cursor-pointer"
+              className="sticky top-0 z-[60] bg-surface-muted border-b border-border cursor-pointer"
               style={{ height: RULER_HEIGHT }}
               onMouseDown={(e) => {
                 handleRulerClick(e)
@@ -458,11 +455,11 @@ export default function Timeline({
                   style={{ left: timeToX(tick.time) }}
                 >
                   <div
-                    className={`w-px ${tick.major ? 'h-3 bg-gray-400' : 'h-2 bg-gray-600'}`}
+                    className={`w-px ${tick.major ? 'h-3 bg-subtle' : 'h-2 bg-border-strong'}`}
                     style={{ marginTop: tick.major ? 0 : 4 }}
                   />
                   {tick.major && (
-                    <span className="absolute text-[10px] text-gray-400 -translate-x-1/2" style={{ top: 12 }}>
+                    <span className="absolute text-[10px] text-subtle -translate-x-1/2" style={{ top: 12 }}>
                       {tick.label}
                     </span>
                   )}
@@ -474,8 +471,8 @@ export default function Timeline({
                 background (amber wash over gray-900) so lanes scrolling under it are hidden; z-[60]
                 like the ruler. Zoom-bar children (z-50) are confined inside this stacking context. */}
             <div
-              className="sticky z-[60] border-b border-gray-800"
-              style={{ height: CAMERA_TRACK_HEIGHT, top: RULER_HEIGHT, background: 'linear-gradient(rgba(245,158,11,0.04), rgba(245,158,11,0.04)), #111827' }}
+              className="sticky z-[60] border-b border-border"
+              style={{ height: CAMERA_TRACK_HEIGHT, top: RULER_HEIGHT, background: 'linear-gradient(rgba(245,158,11,0.08), rgba(245,158,11,0.08)), var(--surface-muted)' }}
               onMouseDown={(e) => {
                 // Click empty camera track: deselect any zoom + seek
                 if (e.target === e.currentTarget) {
@@ -567,6 +564,43 @@ export default function Timeline({
                     >
                       <EyeIcon off={!!zoom.hidden} />
                     </button>
+
+                    {/* Pan/scale keyframe diamonds over the hold — drag to retime (clamped to
+                        neighbors and [0, hold]). Positioned from the bar's left edge by
+                        transitionIn + the keyframe's hold-relative time. */}
+                    {(zoom.keyframes ?? []).map((k, i) => {
+                      const zkfs = zoom.keyframes!
+                      let minTime = i > 0 ? zkfs[i - 1].time + 0.05 : 0
+                      let maxTime = i < zkfs.length - 1 ? zkfs[i + 1].time - 0.05 : zoom.hold
+                      if (minTime > maxTime) { const m = (minTime + maxTime) / 2; minTime = m; maxTime = m }
+                      const isActive = dragState?.kind === 'zoom-move-keyframe' && dragState.zoomId === zoom.id && dragState.kfIndex === i
+                      return (
+                        <div
+                          key={i}
+                          className="absolute top-1/2 w-2.5 h-2.5 border border-black/60 z-30 cursor-ew-resize"
+                          style={{
+                            left: timeToX(zoom.transitionIn + k.time),
+                            background: keyframeColor(i),
+                            transform: 'translate(-50%, -50%) rotate(45deg)',
+                            boxShadow: isActive ? '0 0 0 2px #fff' : 'none',
+                          }}
+                          title={`Keyframe ${i + 1} @ ${k.time.toFixed(2)}s into the hold — drag to retime`}
+                          onMouseDown={(e) => {
+                            e.stopPropagation()
+                            onSelectZoom(zoom.id)
+                            setDragState({
+                              kind: 'zoom-move-keyframe',
+                              zoomId: zoom.id,
+                              kfIndex: i,
+                              startMouseX: e.clientX,
+                              originalTime: k.time,
+                              minTime,
+                              maxTime,
+                            })
+                          }}
+                        />
+                      )
+                    })}
                   </div>
                 )
               })}
@@ -596,7 +630,7 @@ export default function Timeline({
                   style={{
                     top: laneToY(lane),
                     height: LANE_HEIGHT,
-                    background: i % 2 === 0 ? 'rgba(255,255,255,0.02)' : 'transparent',
+                    background: i % 2 === 0 ? 'rgba(0,0,0,0.03)' : 'transparent',
                   }}
                 />
               ))}
@@ -608,10 +642,8 @@ export default function Timeline({
                 const top = laneToY(obj.lane)
                 const color = TYPE_COLORS[obj.type] ?? '#666'
                 const isSelected = obj.id === selectedObjectId
-                // Media clips get split edge handles (speed on top, trim on bottom — spec 14 R8);
-                // very narrow clips fall back to a single speed handle.
+                // Media clips (audio/video) trim on both edges; speed is set from the panel slider.
                 const md = obj.type === 'audio' || obj.type === 'video' ? (obj.data as AudioData | VideoData) : null
-                const splitHandles = md !== null && width >= SPLIT_HANDLE_MIN_WIDTH
                 // Trim "ghosts": the played bar (= duration) is solid; the trimmed-off source is drawn
                 // dimmed on each end so the bar keeps its ORIGINAL full length and the trimmed media
                 // stays visible/recoverable — drag a ghost (or the trim handle) back out to restore.
@@ -672,31 +704,21 @@ export default function Timeline({
                       />
                     )}
 
-                    {/* Left edge handle. Media clips (R8) split into speed (top) + trim (bottom);
-                        non-media / narrow clips keep the single speed handle. */}
-                    {splitHandles && md ? (
-                      <>
-                        <div
-                          className="absolute left-0 top-0 w-1.5 h-1/2 cursor-col-resize z-40 hover:bg-white/40"
-                          title="Drag to change speed"
-                          onMouseDown={(e) => {
-                            e.stopPropagation()
-                            onSelectObject(obj.id)
-                            setDragState({ kind: 'resize-left', objectId: obj.id, startMouseX: e.clientX, originalStartTime: obj.startTime, originalDuration: obj.duration })
-                          }}
-                        />
-                        <div
-                          className="absolute left-0 bottom-0 w-1.5 h-1/2 cursor-ew-resize z-40 flex items-center justify-center bg-amber-400/0 group-hover:bg-amber-400/60"
-                          title="Drag to trim in-point (keeps speed)"
-                          onMouseDown={(e) => {
-                            e.stopPropagation()
-                            onSelectObject(obj.id)
-                            setDragState({ kind: 'trim-left', objectId: obj.id, startMouseX: e.clientX, originalStartTime: obj.startTime, originalDuration: obj.duration, originalSourceIn: srcIn(md), originalSourceOut: srcOut(md), assetDuration: md.originalDuration })
-                          }}
-                        >
-                          <span className="text-[9px] text-black font-bold leading-none pointer-events-none opacity-0 group-hover:opacity-100">[</span>
-                        </div>
-                      </>
+                    {/* Left edge handle. Media clips (audio/video) trim the in-point at constant
+                        speed; non-media clips resize their duration. */}
+                    {md ? (
+                      <div
+                        className="absolute left-0 top-0 w-2 h-full cursor-ew-resize z-40 flex items-center justify-center transition-colors bg-amber-400/25 group-hover:bg-amber-400/60"
+                        style={dragState?.kind === 'trim-left' && dragState.objectId === obj.id ? { background: 'rgba(251,191,36,0.9)' } : undefined}
+                        title="Drag to trim in-point"
+                        onMouseDown={(e) => {
+                          e.stopPropagation()
+                          onSelectObject(obj.id)
+                          setDragState({ kind: 'trim-left', objectId: obj.id, startMouseX: e.clientX, originalStartTime: obj.startTime, originalDuration: obj.duration, originalSourceIn: srcIn(md), originalSourceOut: srcOut(md), assetDuration: md.originalDuration })
+                        }}
+                      >
+                        <span className="text-[9px] text-black font-bold leading-none pointer-events-none opacity-0 group-hover:opacity-100">[</span>
+                      </div>
                     ) : (
                       <div
                         className="absolute left-0 top-0 w-1.5 h-full cursor-col-resize z-40 hover:bg-white/30"
@@ -835,39 +857,26 @@ export default function Timeline({
                       )
                     })}
 
-                    {/* Right edge handle. Media clips (R8) split into speed (top) + trim (bottom). */}
-                    {splitHandles && md ? (
-                      <>
-                        {(() => {
-                          const isActive = dragState?.kind === 'resize-right' && dragState.objectId === obj.id
-                          return (
-                            <div
-                              className="absolute right-0 top-0 w-2 h-1/2 cursor-col-resize z-40 transition-colors"
-                              style={{ background: isActive ? 'rgba(96,165,250,0.9)' : 'rgba(96,165,250,0.25)' }}
-                              title="Drag to change speed"
-                              onMouseEnter={(e) => { if (!dragState) (e.currentTarget.style.background = 'rgba(96,165,250,0.6)') }}
-                              onMouseLeave={(e) => { if (!isActive) (e.currentTarget.style.background = 'rgba(96,165,250,0.25)') }}
-                              onMouseDown={(e) => {
-                                e.stopPropagation()
-                                onSelectObject(obj.id)
-                                setDragState({ kind: 'resize-right', objectId: obj.id, startMouseX: e.clientX, originalDuration: obj.duration })
-                              }}
-                            />
-                          )
-                        })()}
-                        <div
-                          className="absolute right-0 bottom-0 w-2 h-1/2 cursor-ew-resize z-40 flex items-center justify-center bg-amber-400/0 group-hover:bg-amber-400/60"
-                          style={dragState?.kind === 'trim-right' && dragState.objectId === obj.id ? { background: 'rgba(251,191,36,0.9)' } : undefined}
-                          title="Drag to trim out-point (keeps speed)"
-                          onMouseDown={(e) => {
-                            e.stopPropagation()
-                            onSelectObject(obj.id)
-                            setDragState({ kind: 'trim-right', objectId: obj.id, startMouseX: e.clientX, originalDuration: obj.duration, originalSourceIn: srcIn(md), originalSourceOut: srcOut(md), assetDuration: md.originalDuration })
-                          }}
-                        >
-                          <span className="text-[9px] text-black font-bold leading-none pointer-events-none opacity-0 group-hover:opacity-100">]</span>
-                        </div>
-                      </>
+                    {/* Right edge handle. Media clips trim the out-point at constant speed; non-media
+                        clips resize their duration. */}
+                    {md ? (
+                      (() => {
+                        const isActive = dragState?.kind === 'trim-right' && dragState.objectId === obj.id
+                        return (
+                          <div
+                            className="absolute right-0 top-0 w-2 h-full cursor-ew-resize z-40 flex items-center justify-center transition-colors bg-amber-400/25 group-hover:bg-amber-400/60"
+                            style={isActive ? { background: 'rgba(251,191,36,0.9)' } : undefined}
+                            title="Drag to trim out-point"
+                            onMouseDown={(e) => {
+                              e.stopPropagation()
+                              onSelectObject(obj.id)
+                              setDragState({ kind: 'trim-right', objectId: obj.id, startMouseX: e.clientX, originalDuration: obj.duration, originalSourceIn: srcIn(md), originalSourceOut: srcOut(md), assetDuration: md.originalDuration })
+                            }}
+                          >
+                            <span className="text-[9px] text-black font-bold leading-none pointer-events-none opacity-0 group-hover:opacity-100">]</span>
+                          </div>
+                        )
+                      })()
                     ) : (
                       (() => {
                         const isActive = dragState?.kind === 'resize-right' && dragState.objectId === obj.id
@@ -898,7 +907,7 @@ export default function Timeline({
             {/* Playhead — spans the full content height; drawn over the pinned ruler/Camera track
                 (zIndex 65 > their 60) but under the frozen lane gutter (z-[70]) so it hides under it. */}
             <div
-              className="absolute top-0 w-0.5 bg-red-500 pointer-events-none"
+              className="absolute top-0 w-0.5 bg-playhead pointer-events-none"
               style={{
                 left: timeToX(globalTime),
                 height: '100%',

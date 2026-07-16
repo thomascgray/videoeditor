@@ -1,16 +1,25 @@
-import { useRef } from 'react'
+import { useState } from 'react'
+import {
+  IconClock, IconArrowsMove, IconVector, IconLogin, IconLogout, IconDiamond,
+  IconVolume, IconPalette, IconTypography, IconArrowUpRight, IconFocusCentered, IconChevronDown,
+} from '@tabler/icons-react'
 import type {
   TimelineObject, ProjectAction, ArrowData, AudioData, VideoData, TextData, TextAlign,
-  AnimatableProperty, EasingKind, Transition, TransitionKind, SlideDirection, Keyframe,
-  CameraZoom,
+  AnimatableProperty, EasingKind, CameraZoom,
 } from '../types'
 import {
-  KF_EPS, effVal as kfEffVal, editPose, addKeyframeAt,
-  keyframeColor, defaultTransitionEasing,
+  KF_EPS, effVal as kfEffVal, editPose, addKeyframeAt, keyframeColor,
 } from '../lib/keyframes'
+import {
+  zoomHoldTime, zoomTargetPoseAt, editZoomPose, addZoomKeyframeAt, activeZoomKeyframeIndex,
+} from '../lib/camera'
 import { clamp01 } from '../lib/easing'
 import { srcIn, srcOut, sourceSpan, RATE_MIN, RATE_MAX } from '../lib/mediaTiming'
 import { rememberObjectStyle, rememberObjectData } from '../lib/objectDefaults'
+import {
+  Field, NumberInput, TransitionFields, TypeOnBar,
+  KeyframeTrack, KeyframeStatus, ZoomKeyframeTrack, EASINGS, EASING_LABELS, SELECT_CLS,
+} from './propertyControls'
 
 type PropertiesPanelProps = {
   object: TimelineObject | null
@@ -18,28 +27,12 @@ type PropertiesPanelProps = {
   dispatch: React.Dispatch<ProjectAction>
   globalTime: number
   onSeek: (t: number) => void
+  // Arrow/freehand point editing ("Edit points", spec 17 M). onToggleDraw enters/exits drawing.
+  isDrawing?: boolean
+  onToggleDraw?: () => void
 }
 
-const EASINGS: EasingKind[] = [
-  'linear',
-  'easeInQuad', 'easeOutQuad', 'easeInOutQuad',
-  'easeInCubic', 'easeOutCubic', 'easeInOutCubic',
-  'easeOutBack', 'spring',
-]
-const EASING_LABELS: Record<EasingKind, string> = {
-  linear: 'Even pace throughout',
-  easeInQuad: 'Starts slow (gentle)',
-  easeOutQuad: 'Eases to a stop (gentle)',
-  easeInOutQuad: 'Slow at both ends (gentle)',
-  easeInCubic: 'Starts slow, speeds up',
-  easeOutCubic: 'Fast, then eases to a stop',
-  easeInOutCubic: 'Smooth — slow at both ends',
-  easeOutBack: 'Overshoots, then settles',
-  spring: 'Bouncy — springs into place',
-}
-const SELECT_CLS = 'bg-gray-800 text-white text-xs px-2 py-1 rounded border border-gray-700 focus:border-indigo-500 outline-none cursor-pointer'
-
-export default function PropertiesPanel({ object: obj, zoom, dispatch, globalTime, onSeek }: PropertiesPanelProps) {
+export default function PropertiesPanel({ object: obj, zoom, dispatch, globalTime, onSeek, isDrawing, onToggleDraw }: PropertiesPanelProps) {
   // A selected zoom takes over the panel (mutually exclusive with object selection).
   if (zoom) {
     return <ZoomEditor zoom={zoom} dispatch={dispatch} globalTime={globalTime} onSeek={onSeek} />
@@ -47,8 +40,8 @@ export default function PropertiesPanel({ object: obj, zoom, dispatch, globalTim
 
   if (!obj) {
     return (
-      <div className="w-64 bg-gray-900 border-l border-gray-700 p-4 overflow-y-auto text-sm">
-        <p className="text-gray-500 text-xs">No object selected</p>
+      <div className="w-64 bg-surface border-l border-border p-4 overflow-y-auto text-sm">
+        <p className="text-subtle text-xs">No object selected</p>
       </div>
     )
   }
@@ -110,7 +103,7 @@ export default function PropertiesPanel({ object: obj, zoom, dispatch, globalTim
 
   return (
     <div
-      className="w-64 bg-gray-900 border-l border-gray-700 p-4 overflow-y-auto text-sm"
+      className="w-64 bg-surface border-l border-border p-4 overflow-y-auto text-sm"
       style={activeColor ? { boxShadow: `inset 0 0 0 3px ${activeColor}` } : undefined}
     >
       {/* Editing-a-keyframe banner: loud, colored, and matches the canvas selection box + pip */}
@@ -130,13 +123,13 @@ export default function PropertiesPanel({ object: obj, zoom, dispatch, globalTim
           type="text"
           value={obj.name}
           onChange={(e) => update({ name: e.target.value })}
-          className="w-full bg-gray-800 text-white text-sm px-2 py-1 rounded border border-gray-700 focus:border-indigo-500 outline-none"
+          className="w-full bg-surface-muted text-fg text-sm px-2 py-1 rounded border border-border focus:border-accent outline-none"
         />
-        <span className="text-[10px] text-gray-500 mt-1 block capitalize">{obj.type}</span>
+        <span className="text-[10px] text-subtle mt-1 block capitalize">{obj.type}</span>
       </div>
 
       {/* Timing */}
-      <Section title="Timing">
+      <Accordion title="Timing">
         <Field label="Start (s)">
           <NumberInput value={obj.startTime} min={0} step={0.1} onChange={(v) => update({ startTime: v })} />
         </Field>
@@ -156,12 +149,14 @@ export default function PropertiesPanel({ object: obj, zoom, dispatch, globalTim
         </Field>
         {(obj.type === 'audio' || obj.type === 'video') && (() => {
           // Speed and trim are orthogonal (spec 14 R3): Speed writes `duration` (span fixed → rate
-          // changes); In/Out write the source span AND recompute `duration` to keep rate constant.
+          // changes) — set here via the slider, since the timeline edges are trim-only now. In/Out
+          // write the source span AND recompute `duration` to keep the current speed constant.
           const md = obj.data as AudioData | VideoData
           const inVal = srcIn(md)
           const outVal = srcOut(md)
           const span = Math.max(0.01, sourceSpan(md))
           const rate = span / obj.duration
+          const sliderRate = Math.max(RATE_MIN, Math.min(RATE_MAX, rate))
           const r2 = (n: number) => Math.round(n * 100) / 100
           const setSpeed = (s: number) => {
             const clamped = Math.max(RATE_MIN, Math.min(RATE_MAX, s))
@@ -178,9 +173,17 @@ export default function PropertiesPanel({ object: obj, zoom, dispatch, globalTim
           return (
             <>
               <Field label="Speed">
-                <div className="flex items-center gap-1">
-                  <NumberInput value={r2(rate)} min={RATE_MIN} max={RATE_MAX} step={0.05} onChange={setSpeed} />
-                  <span className="text-[10px] text-gray-500">×</span>
+                <div className="flex items-center gap-2 w-full">
+                  <input
+                    type="range"
+                    min={RATE_MIN} max={RATE_MAX} step={0.1}
+                    value={sliderRate}
+                    onChange={(e) => setSpeed(Number(e.target.value))}
+                    onDoubleClick={() => setSpeed(1)}
+                    title="Playback speed — drag to slow down / speed up the clip (double-click for 1×). Changes the clip's length on the timeline."
+                    className="w-full"
+                  />
+                  <span className="text-[10px] text-subtle tabular-nums w-9 text-right">{sliderRate.toFixed(1)}×</span>
                 </div>
               </Field>
               <div className="grid grid-cols-2 gap-2">
@@ -194,11 +197,11 @@ export default function PropertiesPanel({ object: obj, zoom, dispatch, globalTim
             </>
           )
         })()}
-      </Section>
+      </Accordion>
 
       {/* Position (not for audio — audio has no visual) */}
       {isVisual && (
-      <Section title="Position">
+      <Accordion title="Position">
         <div className="grid grid-cols-2 gap-2">
           <Field label="X">
             <NumberInput value={effVal('x')} step={0.01} onChange={(v) => dispatchPose('x', v, false)} />
@@ -227,23 +230,48 @@ export default function PropertiesPanel({ object: obj, zoom, dispatch, globalTim
             checked={obj.ignoreCamera ?? false}
             onChange={(e) => update({ ignoreCamera: e.target.checked })}
             title="When on, this object stays fixed at the full frame and is not affected by camera zooms"
-            className="accent-indigo-500 cursor-pointer"
+            className="accent-accent cursor-pointer"
           />
         </Field>
-      </Section>
+      </Accordion>
+      )}
+
+      {/* Edit points (arrow/freehand) — spec 17 M. Enter/exit per-object point drawing. */}
+      {(obj.type === 'arrow' || obj.type === 'freehand') && onToggleDraw && (
+        <Accordion title="Points">
+          <button
+            onClick={onToggleDraw}
+            className={`w-full px-3 py-1.5 text-xs rounded cursor-pointer transition-colors ${
+              isDrawing ? 'bg-accent text-accent-contrast hover:bg-accent-hover' : 'bg-surface-muted text-fg hover:bg-surface-hover'
+            }`}
+          >
+            {isDrawing ? 'Done editing points' : 'Edit points'}
+          </button>
+          <p className="text-[10px] text-subtle">
+            {isDrawing
+              ? (obj.type === 'arrow'
+                  ? 'Click the canvas to add points · right-click, double-click, or Enter to finish.'
+                  : 'Draw on the canvas · press Esc or Done when finished.')
+              : 'Edit this shape’s points directly on the canvas.'}
+          </p>
+        </Accordion>
       )}
 
       {/* Enter / exit animations (visual objects) */}
       {isVisual && (
         <>
-          <TransitionSection title="On Appear" phase="in" value={obj.enter} objDuration={obj.duration} onChange={(t) => update({ enter: t })} />
-          <TransitionSection title="On Exit" phase="out" value={obj.exit} objDuration={obj.duration} onChange={(t) => update({ exit: t })} />
+          <Accordion title="On Appear">
+            <TransitionFields phase="in" value={obj.enter} objDuration={obj.duration} onChange={(t) => update({ enter: t })} />
+          </Accordion>
+          <Accordion title="On Exit">
+            <TransitionFields phase="out" value={obj.exit} objDuration={obj.duration} onChange={(t) => update({ exit: t })} />
+          </Accordion>
         </>
       )}
 
       {/* Keyframes — whole-pose waypoints, created only via the button */}
       {isVisual && (
-        <Section title="Keyframes">
+        <Accordion title="Keyframes">
           {/* Position indicator: playhead vs this object's keyframes (req 6) */}
           {kfs.length > 0 && (
             <>
@@ -272,71 +300,84 @@ export default function PropertiesPanel({ object: obj, zoom, dispatch, globalTim
             <button
               onClick={addKeyframe}
               title="Capture the object's current pose as a keyframe at the playhead"
-              className="px-1.5 py-0.5 text-[10px] rounded border border-dashed border-gray-600 text-gray-400 hover:text-white hover:border-gray-400 cursor-pointer transition-colors"
+              className="px-1.5 py-0.5 text-[10px] rounded border border-dashed border-border-strong text-muted hover:text-fg hover:border-border-strong cursor-pointer transition-colors"
             >+ Keyframe</button>
           </div>
 
           {activeIdx >= 0 ? (
             <div className="mt-2 space-y-2">
               <div>
-                <label className="text-gray-400 text-xs block mb-1">Motion</label>
+                <label className="text-muted text-xs block mb-1">Motion</label>
                 <select
                   value={kfs[activeIdx].easing}
                   onChange={(e) => setKeyframeEasing(activeIdx, e.target.value as EasingKind)}
-                  className="w-full bg-gray-800 text-white text-[11px] px-1 py-1 rounded border outline-none cursor-pointer"
-                  style={{ borderColor: activeColor ?? '#374151' }}
+                  className="w-full bg-surface-muted text-fg text-[11px] px-1 py-1 rounded border outline-none cursor-pointer"
+                  style={{ borderColor: activeColor ?? 'var(--border)' }}
                 >
                   {EASINGS.map((k) => <option key={k} value={k}>{EASING_LABELS[k]}</option>)}
                 </select>
                 {/* Clarify: the easing shapes the segment ARRIVING at this keyframe (req 7) */}
-                <p className="text-[10px] text-gray-500 mt-1">
+                <p className="text-[10px] text-subtle mt-1">
                   Plays as the object animates{' '}
-                  <span className="text-gray-300">
+                  <span className="text-muted">
                     {activeIdx === 0 ? 'from its start → Keyframe 1' : `from Keyframe ${activeIdx} → Keyframe ${activeIdx + 1}`}
                   </span>.
                 </p>
               </div>
               <button
                 onClick={() => deleteKeyframe(activeIdx)}
-                className="w-full px-2 py-1 text-[11px] text-red-300 bg-red-900/40 hover:bg-red-800/50 rounded cursor-pointer transition-colors"
+                className="w-full px-2 py-1 text-[11px] text-danger bg-danger-soft hover:bg-danger/20 rounded cursor-pointer transition-colors"
               >Delete keyframe {activeIdx + 1}</button>
             </div>
           ) : (
-            <p className="text-[10px] text-gray-500 mt-1">
+            <p className="text-[10px] text-subtle mt-1">
               {kfs.length > 0
                 ? 'Jump to a ◆ keyframe to edit it. Moving the object at any other time drops a keyframe there so it passes through that pose; at the very start it moves the home pose instead.'
                 : 'Press + Keyframe to start animating from the current pose. Once animating, moving the object at other times adds keyframes automatically.'}
             </p>
           )}
-        </Section>
+        </Accordion>
       )}
 
       {/* Volume (audio/video) */}
-      {(obj.type === 'audio' || obj.type === 'video') && (
-        <Section title="Audio">
-          <Field label="Volume">
-            <div className="flex items-center gap-2 w-full">
+      {(obj.type === 'audio' || obj.type === 'video') && (() => {
+        const md = obj.data as AudioData | VideoData
+        const muted = md.muted ?? false
+        return (
+          <Accordion title="Audio">
+            <Field label="Mute">
               <input
-                type="range"
-                min={0} max={100} step={1}
-                value={Math.round((obj.data as AudioData | VideoData).volume * 100)}
-                onChange={(e) => {
-                  const data = obj.data as AudioData | VideoData
-                  update({ data: { ...data, volume: Number(e.target.value) / 100 } })
-                }}
-                className="w-full"
+                type="checkbox"
+                checked={muted}
+                onChange={(e) => update({ data: { ...md, muted: e.target.checked } })}
+                title={obj.type === 'video'
+                  ? "Silence this video's audio track in preview and export (the video still shows)"
+                  : "Silence this clip in preview and export"}
+                className="accent-accent cursor-pointer"
               />
-              <span className="text-[10px] text-gray-500 tabular-nums w-8 text-right">
-                {Math.round((obj.data as AudioData | VideoData).volume * 100)}%
-              </span>
-            </div>
-          </Field>
-        </Section>
-      )}
+            </Field>
+            <Field label="Volume">
+              <div className={`flex items-center gap-2 w-full ${muted ? 'opacity-40' : ''}`}>
+                <input
+                  type="range"
+                  min={0} max={100} step={1}
+                  value={Math.round(md.volume * 100)}
+                  disabled={muted}
+                  onChange={(e) => update({ data: { ...md, volume: Number(e.target.value) / 100 } })}
+                  className="w-full"
+                />
+                <span className="text-[10px] text-subtle tabular-nums w-8 text-right">
+                  {Math.round(md.volume * 100)}%
+                </span>
+              </div>
+            </Field>
+          </Accordion>
+        )
+      })()}
 
       {/* Style (for non-photo, non-audio, non-video objects) */}
       {obj.type !== 'photo' && obj.type !== 'audio' && obj.type !== 'video' && (
-        <Section title="Style">
+        <Accordion title="Style">
           <Field label="Color">
             <input
               type="color"
@@ -364,18 +405,18 @@ export default function PropertiesPanel({ object: obj, zoom, dispatch, globalTim
               <NumberInput value={obj.style.fontSize ?? 32} min={8} max={200} step={1} onChange={(v) => updateStyle({ fontSize: v })} />
             </Field>
           )}
-        </Section>
+        </Accordion>
       )}
 
       {/* Text-specific */}
       {obj.type === 'text' && (
-        <Section title="Text">
+        <Accordion title="Text">
           <textarea
             value={(obj.data as TextData).content}
             onChange={(e) => update({ data: { ...(obj.data as TextData), content: e.target.value } })}
             rows={3}
             placeholder="Enter text…"
-            className="w-full bg-gray-800 text-white text-xs px-2 py-1 rounded border border-gray-700 focus:border-indigo-500 outline-none resize-y"
+            className="w-full bg-surface-muted text-fg text-xs px-2 py-1 rounded border border-border focus:border-accent outline-none resize-y"
           />
           <Field label="Font">
             <select
@@ -395,7 +436,7 @@ export default function PropertiesPanel({ object: obj, zoom, dispatch, globalTim
               checked={(obj.data as TextData).autoSize !== false}
               onChange={(e) => updateData({ autoSize: e.target.checked }, { autoSize: e.target.checked })}
               title="When on, the text is sized to fill its box. When off, use the Font size field."
-              className="accent-indigo-500 cursor-pointer"
+              className="accent-accent cursor-pointer"
             />
           </Field>
           <Field label="Align">
@@ -415,7 +456,7 @@ export default function PropertiesPanel({ object: obj, zoom, dispatch, globalTim
               type="checkbox"
               checked={(obj.style.fontWeight ?? 'bold') === 'bold'}
               onChange={(e) => updateStyle({ fontWeight: e.target.checked ? 'bold' : 'normal' })}
-              className="accent-indigo-500 cursor-pointer"
+              className="accent-accent cursor-pointer"
             />
           </Field>
           <Field label="Italic">
@@ -423,7 +464,7 @@ export default function PropertiesPanel({ object: obj, zoom, dispatch, globalTim
               type="checkbox"
               checked={(obj.style.fontStyle ?? 'normal') === 'italic'}
               onChange={(e) => updateStyle({ fontStyle: e.target.checked ? 'italic' : 'normal' })}
-              className="accent-indigo-500 cursor-pointer"
+              className="accent-accent cursor-pointer"
             />
           </Field>
           <Field label="Background">
@@ -436,7 +477,7 @@ export default function PropertiesPanel({ object: obj, zoom, dispatch, globalTim
                   const next = e.target.checked ? (data.background ?? '#000000') : undefined
                   updateData({ background: next }, { background: next })
                 }}
-                className="accent-indigo-500 cursor-pointer"
+                className="accent-accent cursor-pointer"
               />
               {(obj.data as TextData).background != null && (
                 <input
@@ -448,18 +489,18 @@ export default function PropertiesPanel({ object: obj, zoom, dispatch, globalTim
               )}
             </div>
           </Field>
-        </Section>
+        </Accordion>
       )}
 
       {/* Arrow-specific */}
       {obj.type === 'arrow' && (
-        <Section title="Arrow">
+        <Accordion title="Arrow">
           <Field label="Moving head">
             <input
               type="checkbox"
               checked={(obj.data as ArrowData).progressiveHead ?? true}
               onChange={(e) => updateData({ progressiveHead: e.target.checked }, { progressiveHead: e.target.checked })}
-              className="accent-indigo-500 cursor-pointer"
+              className="accent-accent cursor-pointer"
             />
           </Field>
           <Field label="Curvature">
@@ -475,17 +516,17 @@ export default function PropertiesPanel({ object: obj, zoom, dispatch, globalTim
                 onDoubleClick={() => updateData({ curvature: 0 }, { curvature: 0 })}
                 className="w-full"
               />
-              <span className="text-[10px] text-gray-500 tabular-nums w-8 text-right">
+              <span className="text-[10px] text-subtle tabular-nums w-8 text-right">
                 {((obj.data as ArrowData).curvature ?? 0).toFixed(1)}
               </span>
             </div>
           </Field>
-        </Section>
+        </Accordion>
       )}
 
       {/* Photo/video opacity */}
       {(obj.type === 'photo' || obj.type === 'video') && (
-        <Section title="Style">
+        <Accordion title="Style">
           <Field label="Opacity">
             <input
               type="range"
@@ -497,20 +538,20 @@ export default function PropertiesPanel({ object: obj, zoom, dispatch, globalTim
               className="w-full"
             />
           </Field>
-        </Section>
+        </Accordion>
       )}
 
       {/* Actions */}
       <div className="mt-4 space-y-2">
         <button
           onClick={() => dispatch({ type: 'DUPLICATE_OBJECT', objectId: obj.id })}
-          className="w-full px-3 py-1.5 text-xs bg-gray-800 hover:bg-gray-700 rounded transition-colors cursor-pointer"
+          className="w-full px-3 py-1.5 text-xs bg-surface-muted hover:bg-surface-hover rounded transition-colors cursor-pointer"
         >
           Duplicate
         </button>
         <button
           onClick={() => dispatch({ type: 'REMOVE_OBJECT', objectId: obj.id })}
-          className="w-full px-3 py-1.5 text-xs bg-red-900/50 hover:bg-red-800/50 text-red-300 rounded transition-colors cursor-pointer"
+          className="w-full px-3 py-1.5 text-xs bg-danger-soft hover:bg-danger/20 text-danger rounded transition-colors cursor-pointer"
         >
           Delete
         </button>
@@ -536,35 +577,60 @@ function ZoomEditor({
   const end = zoom.startTime + envelope
   const withinSpan = globalTime >= zoom.startTime && globalTime <= end
 
+  // Keyframe (pan/scale path) state. Hold-relative playhead time is where edits land.
+  const holdTime = Math.max(0, Math.min(zoom.hold, zoomHoldTime(zoom, globalTime)))
+  const pose = zoomTargetPoseAt(zoom, globalTime)
+  const kfs = zoom.keyframes ?? []
+  const activeIdx = activeZoomKeyframeIndex(zoom, globalTime)
+  const activeColor = activeIdx >= 0 ? keyframeColor(activeIdx) : null
+
+  // Edit a pose component keyframe-aware: reshapes the active keyframe, drops one mid-hold on a
+  // keyframed zoom, or moves the home/base pose otherwise.
+  const editZoom = (overrides: Partial<{ x: number; y: number; scale: number }>) =>
+    update(editZoomPose(zoom, overrides, holdTime))
+  const addZoomKeyframe = () => update({ keyframes: addZoomKeyframeAt(zoom, holdTime) })
+  const setZoomKeyframeEasing = (idx: number, easing: EasingKind) =>
+    update({ keyframes: kfs.map((k, j) => (j === idx ? { ...k, easing } : k)) })
+  const deleteZoomKeyframe = (idx: number) => {
+    const next = kfs.filter((_, j) => j !== idx)
+    update({ keyframes: next.length ? next : undefined })
+  }
+
   return (
-    <div className="w-64 bg-gray-900 border-l border-gray-700 p-4 overflow-y-auto text-sm">
-      {/* Header */}
-      <div className="mb-4 flex items-center gap-2 px-2 py-1.5 rounded text-white text-xs font-semibold bg-amber-600/80">
-        <span className="text-sm leading-none">⛶</span>
-        <span>Camera Zoom</span>
+    <div
+      className="w-64 bg-surface border-l border-border p-4 overflow-y-auto text-sm"
+      style={activeColor ? { boxShadow: `inset 0 0 0 3px ${activeColor}` } : undefined}
+    >
+      {/* Header — turns into the keyframe's color when the playhead is parked on one. */}
+      <div
+        className="mb-4 flex items-center gap-2 px-2 py-1.5 rounded text-white text-xs font-semibold"
+        style={{ background: activeColor ?? 'rgba(217,119,6,0.8)' }}
+      >
+        <span className="text-sm leading-none">{activeColor ? '◆' : '⛶'}</span>
+        <span>{activeColor ? `Camera Zoom · Keyframe ${activeIdx + 1}` : 'Camera Zoom'}</span>
       </div>
-      <p className="text-[10px] text-gray-500 mb-4 -mt-2">
+      <p className="text-[10px] text-subtle mb-4 -mt-2">
         Frame a region to punch into. Edit the framing rectangle on the canvas, or the numbers below.
-        Toggle <span className="text-gray-300">Live</span> on the canvas to preview the real push-in.
+        Add keyframes to pan / scale across the hold. Toggle <span className="text-muted">Live</span> to preview.
       </p>
 
-      {/* Focus target */}
-      <Section title="Focus">
+      {/* Focus target — keyframe-aware (shows + edits the pose at the playhead) */}
+      <Accordion title="Focus">
         <div className="grid grid-cols-2 gap-2">
           <Field label="X">
-            <NumberInput value={zoom.x} min={0} max={1} step={0.01} onChange={(v) => update({ x: clamp01(v) })} />
+            <NumberInput value={pose.x} min={0} max={1} step={0.01} onChange={(v) => editZoom({ x: clamp01(v) })} />
           </Field>
           <Field label="Y">
-            <NumberInput value={zoom.y} min={0} max={1} step={0.01} onChange={(v) => update({ y: clamp01(v) })} />
+            <NumberInput value={pose.y} min={0} max={1} step={0.01} onChange={(v) => editZoom({ y: clamp01(v) })} />
           </Field>
         </div>
         <Field label="Zoom (×)">
-          <NumberInput value={zoom.scale} min={1} step={0.1} onChange={(v) => update({ scale: Math.max(1, v) })} />
+          <NumberInput value={pose.scale} min={1} step={0.1} onChange={(v) => editZoom({ scale: Math.max(1, v) })} />
         </Field>
-      </Section>
+      </Accordion>
 
       {/* Timing envelope */}
-      <Section title="Timing">
+      <Accordion title="Timing">
         <Field label="Start (s)">
           <NumberInput value={zoom.startTime} min={0} step={0.1} onChange={(v) => update({ startTime: Math.max(0, v) })} />
         </Field>
@@ -578,36 +644,94 @@ function ZoomEditor({
           <NumberInput value={zoom.transitionOut} min={0} step={0.1} onChange={(v) => update({ transitionOut: Math.max(0, v) })} />
         </Field>
         <div>
-          <label className="text-gray-400 text-xs block mb-1">Motion</label>
+          <label className="text-muted text-xs block mb-1">Motion</label>
           <select
             value={zoom.easing}
             onChange={(e) => update({ easing: e.target.value as EasingKind })}
-            className="w-full bg-gray-800 text-white text-[11px] px-1 py-1 rounded border border-gray-700 focus:border-indigo-500 outline-none cursor-pointer"
+            className="w-full bg-surface-muted text-fg text-[11px] px-1 py-1 rounded border border-border focus:border-accent outline-none cursor-pointer"
           >
             {EASINGS.map((k) => <option key={k} value={k}>{EASING_LABELS[k]}</option>)}
           </select>
-          <p className="text-[10px] text-gray-500 mt-1">Shapes both the push-in and the pull-out ramps.</p>
+          <p className="text-[10px] text-subtle mt-1">Shapes both the push-in and the pull-out ramps.</p>
         </div>
-        <div className="flex items-center justify-between text-[10px] text-gray-500 tabular-nums pt-1">
+        <div className="flex items-center justify-between text-[10px] text-subtle tabular-nums pt-1">
           <span>Span: {zoom.startTime.toFixed(1)}s → {end.toFixed(1)}s</span>
           <span>({envelope.toFixed(1)}s)</span>
         </div>
         <button
           onClick={() => onSeek(zoom.startTime)}
           className={`w-full px-2 py-1 text-[11px] rounded cursor-pointer transition-colors ${
-            withinSpan ? 'bg-gray-800 text-gray-400 hover:bg-gray-700' : 'bg-indigo-900/50 text-indigo-300 hover:bg-indigo-800/50'
+            withinSpan ? 'bg-surface-muted text-muted hover:bg-surface-hover' : 'bg-accent-soft text-accent hover:bg-accent/20'
           }`}
           title="Move the playhead to this zoom's start"
         >
           {withinSpan ? 'Playhead is on this zoom' : 'Jump to zoom start'}
         </button>
-      </Section>
+      </Accordion>
+
+      {/* Keyframes — a pan/scale path over the hold (parity with object keyframes) */}
+      <Accordion title="Keyframes">
+        {kfs.length > 0 && (
+          <ZoomKeyframeTrack zoom={zoom} kfs={kfs} holdTime={holdTime} activeIdx={activeIdx} onSeek={onSeek} />
+        )}
+
+        {/* Numbered pips (click to jump) — each keeps the keyframe's own accent color */}
+        <div className="flex flex-wrap items-center gap-1">
+          {kfs.map((k, i) => {
+            const color = keyframeColor(i)
+            const active = i === activeIdx
+            return (
+              <button
+                key={i}
+                onClick={() => onSeek(zoom.startTime + zoom.transitionIn + k.time)}
+                title={`Keyframe ${i + 1} @ ${k.time.toFixed(2)}s into the hold — click to jump`}
+                className="px-2 py-0.5 text-[10px] tabular-nums rounded border cursor-pointer transition-colors"
+                style={active
+                  ? { background: color, borderColor: '#fff', color: '#fff', fontWeight: 700, boxShadow: `0 0 0 1px ${color}` }
+                  : { background: 'transparent', borderColor: color, color }}
+              >◆ {i + 1}</button>
+            )
+          })}
+          <button
+            onClick={addZoomKeyframe}
+            title="Capture the current framing as a keyframe at the playhead"
+            className="px-1.5 py-0.5 text-[10px] rounded border border-dashed border-border-strong text-muted hover:text-fg hover:border-border-strong cursor-pointer transition-colors"
+          >+ Keyframe</button>
+        </div>
+
+        {activeIdx >= 0 ? (
+          <div className="mt-2 space-y-2">
+            <div>
+              <label className="text-muted text-xs block mb-1">Motion</label>
+              <select
+                value={kfs[activeIdx].easing}
+                onChange={(e) => setZoomKeyframeEasing(activeIdx, e.target.value as EasingKind)}
+                className="w-full bg-surface-muted text-fg text-[11px] px-1 py-1 rounded border outline-none cursor-pointer"
+                style={{ borderColor: activeColor ?? 'var(--border)' }}
+              >
+                {EASINGS.map((k) => <option key={k} value={k}>{EASING_LABELS[k]}</option>)}
+              </select>
+              <p className="text-[10px] text-subtle mt-1">Shapes the pan / scale arriving at this keyframe.</p>
+            </div>
+            <button
+              onClick={() => deleteZoomKeyframe(activeIdx)}
+              className="w-full px-2 py-1 text-[11px] text-danger bg-danger-soft hover:bg-danger/20 rounded cursor-pointer transition-colors"
+            >Delete keyframe {activeIdx + 1}</button>
+          </div>
+        ) : (
+          <p className="text-[10px] text-subtle mt-1">
+            {kfs.length > 0
+              ? 'Jump to a ◆ keyframe to edit it. Reframe elsewhere in the hold to drop a keyframe there; at the hold start it moves the home pose.'
+              : 'Add keyframes to pan / scale the camera across the hold. Press + Keyframe, then move the playhead and reframe to build a path.'}
+          </p>
+        )}
+      </Accordion>
 
       {/* Actions */}
       <div className="mt-4">
         <button
           onClick={() => dispatch({ type: 'REMOVE_ZOOM', zoomId: zoom.id })}
-          className="w-full px-3 py-1.5 text-xs bg-red-900/50 hover:bg-red-800/50 text-red-300 rounded transition-colors cursor-pointer"
+          className="w-full px-3 py-1.5 text-xs bg-danger-soft hover:bg-danger/20 text-danger rounded transition-colors cursor-pointer"
         >
           Delete zoom
         </button>
@@ -616,285 +740,37 @@ function ZoomEditor({
   )
 }
 
-// --- Helper components ---
-
-function TransitionSection({
-  title, phase, value, objDuration, onChange,
-}: {
-  title: string
-  phase: 'in' | 'out'
-  value?: Transition
-  objDuration: number
-  onChange: (t?: Transition) => void
-}) {
-  const kind = value?.kind ?? 'none'
-  const patch = (p: Partial<Transition>) => {
-    const next: Transition = {
-      kind,
-      duration: value?.duration ?? 0.5,
-      direction: value?.direction ?? 'left',
-      easing: value?.easing,
-      ...p,
-    }
-    onChange(next.kind === 'none' ? undefined : next)
-  }
-  const dur = value?.duration ?? 0.5
-  const maxDur = Math.max(0.1, objDuration)
-  // The effective curve — falls back to the kind's sensible default when none is chosen.
-  const effEasing = value?.easing ?? defaultTransitionEasing(kind === 'none' ? 'fade' : kind, phase)
-  return (
-    <Section title={title}>
-      <Field label="Type">
-        <select value={kind} onChange={(e) => patch({ kind: e.target.value as TransitionKind })} className={SELECT_CLS}>
-          <option value="none">None</option>
-          <option value="fade">Fade</option>
-          <option value="slide">Slide</option>
-          <option value="pop">Pop</option>
-        </select>
-      </Field>
-      {kind !== 'none' && (
-        <>
-          {kind === 'slide' && (
-            <Field label="From">
-              <select
-                value={value?.direction ?? 'left'}
-                onChange={(e) => patch({ direction: e.target.value as SlideDirection })}
-                className={SELECT_CLS}
-              >
-                <option value="left">← Left</option>
-                <option value="right">→ Right</option>
-                <option value="top">↑ Top</option>
-                <option value="bottom">↓ Bottom</option>
-              </select>
-            </Field>
-          )}
-          <div>
-            <label className="text-gray-400 text-xs block mb-1">Motion</label>
-            <select
-              value={effEasing}
-              onChange={(e) => patch({ easing: e.target.value as EasingKind })}
-              className="w-full bg-gray-800 text-white text-[11px] px-1 py-1 rounded border border-gray-700 focus:border-indigo-500 outline-none cursor-pointer"
-            >
-              {EASINGS.map((k) => <option key={k} value={k}>{EASING_LABELS[k]}</option>)}
-            </select>
-          </div>
-          <div>
-            <div className="flex items-center justify-between mb-1">
-              <label className="text-gray-400 text-xs">Duration</label>
-              <span className="text-[10px] text-gray-500 tabular-nums">{dur.toFixed(1)}s of {objDuration.toFixed(1)}s</span>
-            </div>
-            <input
-              type="range"
-              min={0.1}
-              max={maxDur}
-              step={0.1}
-              value={Math.min(dur, maxDur)}
-              onChange={(e) => patch({ duration: Number(e.target.value) })}
-              className="w-full"
-            />
-            {/* Lifespan bar: how much of the object's whole life on the scrubber this transition
-                occupies — filled from the start (enter) or the end (exit). */}
-            <LifespanBar duration={objDuration} portion={dur} align={phase === 'in' ? 'left' : 'right'} />
-          </div>
-        </>
-      )}
-    </Section>
-  )
+// --- Inspector section (spec 17 P3) ---
+// Distinct, iconed, collapsible cards — the fix for the "sections aren't distinct" complaint. This
+// is inspector-only chrome; the toolbar popovers keep the plain `Section` from propertyControls.
+const SECTION_ICONS: Record<string, React.ReactNode> = {
+  Timing: <IconClock size={15} stroke={2} />,
+  Position: <IconArrowsMove size={15} stroke={2} />,
+  Points: <IconVector size={15} stroke={2} />,
+  'On Appear': <IconLogin size={15} stroke={2} />,
+  'On Exit': <IconLogout size={15} stroke={2} />,
+  Keyframes: <IconDiamond size={15} stroke={2} />,
+  Audio: <IconVolume size={15} stroke={2} />,
+  Style: <IconPalette size={15} stroke={2} />,
+  Text: <IconTypography size={15} stroke={2} />,
+  Arrow: <IconArrowUpRight size={15} stroke={2} />,
+  Focus: <IconFocusCentered size={15} stroke={2} />,
 }
 
-/**
- * Draggable "type-on" bar: the track is the object's full lifespan, the amber fill is how long the
- * object takes to type/draw on. Drag anywhere (fully left = instant / no reveal). Uses transient
- * dispatch while dragging so the whole gesture is a single undo entry.
- */
-function TypeOnBar({
-  animateIn, duration, onChange, onCommit,
-}: {
-  animateIn: number
-  duration: number
-  onChange: (v: number) => void
-  onCommit: () => void
-}) {
-  const dragging = useRef(false)
-  const pct = duration > 0 ? clamp01(animateIn / duration) * 100 : 0
-
-  const setFromEvent = (e: React.PointerEvent<HTMLDivElement>) => {
-    const rect = e.currentTarget.getBoundingClientRect()
-    const frac = rect.width > 0 ? clamp01((e.clientX - rect.left) / rect.width) : 0
-    onChange(Math.round(frac * duration * 10) / 10)
-  }
-
+function Accordion({ title, children }: { title: string; children: React.ReactNode }) {
+  const [open, setOpen] = useState(true)
   return (
-    <div>
-      <div className="flex items-center justify-between mb-1">
-        <label className="text-gray-400 text-xs">Reveal</label>
-        <span className="text-[10px] text-gray-500 tabular-nums">
-          {animateIn <= 0 ? 'instant' : `${animateIn.toFixed(1)}s of ${duration.toFixed(1)}s`}
-        </span>
-      </div>
-      <div
-        className="relative h-4 w-full rounded bg-gray-700 cursor-ew-resize select-none touch-none"
-        title="Drag to set how long the object takes to reveal (type / draw on / grow in) — fully left = instant"
-        onPointerDown={(e) => {
-          e.preventDefault()
-          dragging.current = true
-          e.currentTarget.setPointerCapture(e.pointerId)
-          setFromEvent(e)
-        }}
-        onPointerMove={(e) => { if (dragging.current) setFromEvent(e) }}
-        onPointerUp={(e) => {
-          if (!dragging.current) return
-          dragging.current = false
-          e.currentTarget.releasePointerCapture(e.pointerId)
-          onCommit()
-        }}
+    <div className="mb-2 overflow-hidden rounded-lg border border-border bg-surface-muted/40">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full items-center gap-2 px-2.5 py-2 text-left transition-colors hover:bg-surface-hover cursor-pointer"
       >
-        {/* Filled type-on portion, striped to match the timeline stripe */}
-        <div className="absolute top-0 left-0 h-full rounded-l bg-amber-500/50 pointer-events-none" style={{ width: `${pct}%` }} />
-        <div
-          className="absolute top-0 left-0 h-full pointer-events-none"
-          style={{ width: `${pct}%`, background: 'repeating-linear-gradient(90deg, rgba(255,255,255,0.18) 0px, rgba(255,255,255,0.18) 3px, transparent 3px, transparent 6px)' }}
-        />
-        {/* Grabber at the right edge of the fill */}
-        <div
-          className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-1.5 h-6 rounded-sm bg-amber-300 border border-amber-700 pointer-events-none"
-          style={{ left: `${pct}%` }}
-        />
-      </div>
+        <span className="text-subtle">{SECTION_ICONS[title]}</span>
+        <span className="flex-1 text-[11px] font-semibold uppercase tracking-wider text-fg">{title}</span>
+        <IconChevronDown size={14} stroke={2} className={`text-subtle transition-transform ${open ? '' : '-rotate-90'}`} />
+      </button>
+      {open && <div className="space-y-2 px-2.5 pb-2.5 pt-0.5">{children}</div>}
     </div>
-  )
-}
-
-/** The object's full lifespan as a bar, with the transition's slice filled from one end. */
-function LifespanBar({ duration, portion, align }: { duration: number; portion: number; align: 'left' | 'right' }) {
-  const pct = duration > 0 ? Math.min(100, (portion / duration) * 100) : 0
-  return (
-    <div
-      className="relative h-2 w-full rounded bg-gray-700 overflow-hidden mt-1"
-      title="Transition length relative to the object's full lifespan"
-    >
-      <div
-        className="absolute top-0 h-full bg-indigo-500/70"
-        style={{ width: `${pct}%`, left: align === 'left' ? 0 : undefined, right: align === 'right' ? 0 : undefined }}
-      />
-    </div>
-  )
-}
-
-/** Mini timeline: this object's keyframes as colored diamonds + the live playhead position (req 6). */
-function KeyframeTrack({
-  obj, kfs, clipTime, activeIdx, onSeek,
-}: {
-  obj: TimelineObject
-  kfs: Keyframe[]
-  clipTime: number
-  activeIdx: number
-  onSeek: (t: number) => void
-}) {
-  const dur = obj.duration > 0 ? obj.duration : 1
-  const playPct = clamp01(clipTime / dur) * 100
-  return (
-    <div className="relative h-9 w-full mb-1 select-none">
-      {/* baseline spanning the clip's lifespan */}
-      <div className="absolute left-0 right-0 top-1/2 h-px -translate-y-1/2 bg-gray-600" />
-      {/* playhead */}
-      <div className="absolute top-1 bottom-3 w-0.5 -translate-x-1/2 bg-red-500 z-10" style={{ left: `${playPct}%` }} />
-      {/* keyframe diamonds, positioned by time and colored to match their pip */}
-      {kfs.map((k, i) => {
-        const pct = clamp01(k.time / dur) * 100
-        const color = keyframeColor(i)
-        const active = i === activeIdx
-        return (
-          <button
-            key={i}
-            onClick={() => onSeek(obj.startTime + k.time)}
-            title={`Keyframe ${i + 1} @ ${k.time.toFixed(2)}s — click to jump`}
-            className="absolute top-1/2 -translate-x-1/2 -translate-y-1/2 z-20 cursor-pointer"
-            style={{ left: `${pct}%` }}
-          >
-            <span
-              className="block w-3 h-3 rotate-45 border"
-              style={{
-                background: color,
-                borderColor: active ? '#fff' : 'rgba(0,0,0,0.5)',
-                boxShadow: active ? '0 0 0 2px #fff' : 'none',
-              }}
-            />
-            <span className="absolute left-1/2 -translate-x-1/2 top-3 text-[9px] tabular-nums text-gray-400">{i + 1}</span>
-          </button>
-        )
-      })}
-    </div>
-  )
-}
-
-/** One-line status: where the playhead sits relative to the object's keyframes (req 6). */
-function KeyframeStatus({ kfs, clipTime, activeIdx }: { kfs: Keyframe[]; clipTime: number; activeIdx: number }) {
-  let text: string
-  let color: string | null = null
-  if (activeIdx >= 0) {
-    text = `On keyframe ${activeIdx + 1}`
-    color = keyframeColor(activeIdx)
-  } else if (clipTime <= kfs[0].time) {
-    text = 'Before keyframe 1'
-  } else if (clipTime >= kfs[kfs.length - 1].time) {
-    text = `Past keyframe ${kfs.length}`
-  } else {
-    let i = 0
-    while (i < kfs.length - 1 && !(clipTime >= kfs[i].time && clipTime < kfs[i + 1].time)) i++
-    text = `Between keyframe ${i + 1} and ${i + 2}`
-  }
-  return (
-    <p className="text-[10px] mb-2 flex items-center gap-1">
-      <span className="text-gray-500">Playhead:</span>
-      <span className="font-semibold" style={{ color: color ?? '#d1d5db' }}>{text}</span>
-    </p>
-  )
-}
-
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <div className="mb-4">
-      <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">{title}</h3>
-      <div className="space-y-2">{children}</div>
-    </div>
-  )
-}
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="flex items-center justify-between gap-2">
-      <label className="text-gray-400 text-xs shrink-0">{label}</label>
-      {children}
-    </div>
-  )
-}
-
-function NumberInput({
-  value,
-  onChange,
-  min,
-  max,
-  step = 0.1,
-}: {
-  value: number
-  onChange: (v: number) => void
-  min?: number
-  max?: number
-  step?: number
-}) {
-  return (
-    <input
-      type="number"
-      value={Number(value.toFixed(2))}
-      min={min}
-      max={max}
-      step={step}
-      onChange={(e) => {
-        const v = parseFloat(e.target.value)
-        if (!isNaN(v)) onChange(v)
-      }}
-      className="w-20 bg-gray-800 text-white text-xs px-2 py-1 rounded border border-gray-700 focus:border-indigo-500 outline-none text-right"
-    />
   )
 }

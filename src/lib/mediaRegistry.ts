@@ -20,3 +20,24 @@ export function unregisterVideoElement(objectId: string): void {
 export function getVideoElement(objectId: string): HTMLVideoElement | undefined {
   return videoElements.get(objectId)
 }
+
+/**
+ * "A video element just decoded a frame worth painting" bus.
+ *
+ * `useAudioPlayback` (parent) creates + registers the elements; `useCanvasRenderer`
+ * (child) blits them. On the import commit the child's effects run BEFORE the parent
+ * registers the element, so the canvas can't subscribe to the element directly — it
+ * would miss the first-frame `loadeddata`. Instead the element fires here and the
+ * canvas re-renders, no matter the effect ordering. Fixes: an imported video staying
+ * blank until the next scrub / re-layout.
+ */
+const readyListeners = new Set<() => void>()
+
+export function subscribeVideoReady(cb: () => void): () => void {
+  readyListeners.add(cb)
+  return () => readyListeners.delete(cb)
+}
+
+export function notifyVideoReady(): void {
+  for (const cb of readyListeners) cb()
+}

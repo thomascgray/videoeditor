@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import type { TimelineObject, AudioData, VideoData } from '../types'
 import { getAssetUrl } from '../lib/assetStore'
-import { registerVideoElement, unregisterVideoElement } from '../lib/mediaRegistry'
-import { clipRate, sourceTimeAt } from '../lib/mediaTiming'
+import { registerVideoElement, unregisterVideoElement, notifyVideoReady } from '../lib/mediaRegistry'
+import { clipRate, sourceTimeAt, effectiveVolume } from '../lib/mediaTiming'
 
 type MediaEntry = {
   objectId: string
@@ -20,6 +20,9 @@ export function useAudioPlayback(
   objects: TimelineObject[],
   globalTime: number,
   isPlaying: boolean,
+  // Preview playback speed (usePlayback) — the playhead advances this much faster, so each media
+  // element must play at rate * previewSpeed to stay in sync. Export is unaffected (separate path).
+  previewSpeed = 1,
 ) {
   const [isMuted, setIsMuted] = useState(false)
   // Master preview volume (0–1). Scales each clip's own data.volume; a monitoring level for
@@ -73,10 +76,10 @@ export function useAudioPlayback(
 
       if (existing && existing.assetId === data.assetId) {
         // Update volume and playbackRate on existing element (rate honors trim: span/duration)
-        existing.element.playbackRate = clipRate(data, obj.duration)
-        existing.element.volume = clamp01(data.volume * volumeRef.current)
+        existing.element.playbackRate = clipRate(data, obj.duration) * previewSpeed
+        existing.element.volume = clamp01(effectiveVolume(data) * volumeRef.current)
         existing.originalDuration = data.originalDuration
-        existing.volume = data.volume
+        existing.volume = effectiveVolume(data)
         continue
       }
 
@@ -95,15 +98,18 @@ export function useAudioPlayback(
         : document.createElement('audio')
       el.src = url
       el.preload = 'auto'
-      el.volume = clamp01(data.volume * volumeRef.current)
+      el.volume = clamp01(effectiveVolume(data) * volumeRef.current)
       el.muted = isMuted
 
-      el.playbackRate = clipRate(data, obj.duration)
+      el.playbackRate = clipRate(data, obj.duration) * previewSpeed
 
       // Video elements double as the canvas image source (A2). playsInline lets a
       // detached element decode frames; register it so useCanvasRenderer can draw it.
       if (obj.type === 'video') {
         ;(el as HTMLVideoElement).playsInline = true
+        // Paint the canvas the moment the first frame decodes, so a freshly imported
+        // clip appears immediately instead of blank-until-next-scrub.
+        el.addEventListener('loadeddata', notifyVideoReady)
         registerVideoElement(obj.id, el as HTMLVideoElement)
       }
 
@@ -112,7 +118,7 @@ export function useAudioPlayback(
         assetId: data.assetId,
         element: el,
         originalDuration: data.originalDuration,
-        volume: data.volume,
+        volume: effectiveVolume(data),
       })
     }
 
@@ -125,7 +131,7 @@ export function useAudioPlayback(
         entries.delete(id)
       }
     }
-  }, [objects, isMuted])
+  }, [objects, isMuted, previewSpeed])
 
   // Sync play/pause and currentTime
   useEffect(() => {
@@ -150,7 +156,7 @@ export function useAudioPlayback(
         const clipProgress = (globalTime - clipStart) / obj.duration
         const sourceTime = sourceTimeAt(data, clipProgress)
 
-        el.playbackRate = clipRate(data, obj.duration)
+        el.playbackRate = clipRate(data, obj.duration) * previewSpeed
 
         // Only seek if we're significantly out of sync (>0.3s)
         if (Math.abs(el.currentTime - sourceTime) > 0.3) {

@@ -1,10 +1,15 @@
-import { useRef, useEffect, useState, useCallback, useMemo } from 'react'
+import { useRef, useEffect, useLayoutEffect, useState, useCallback, useMemo } from 'react'
 import type { TimelineObject, InteractionMode, ProjectAction, ArrowData, FreehandData, CameraZoom } from '../types'
 import { useCanvasRenderer } from '../hooks/useCanvasRenderer'
 import type { EditorOptions } from '../lib/renderer'
 import { segmentControlPoint } from '../lib/annotations'
 import { resolvePose, editPose, activeKeyframeIndex, keyframeColor } from '../lib/keyframes'
-import { resolveCamera, cameraFrameRect, isIdentityCamera, governingZoomAt } from '../lib/camera'
+import {
+  resolveCamera, cameraFrameRect, isIdentityCamera, governingZoomAt,
+  zoomTargetPoseAt, editZoomPose, activeZoomKeyframeIndex, zoomHoldTime,
+} from '../lib/camera'
+import { IconViewfinder, IconPlayerPlay, IconMinus, IconPlus } from '@tabler/icons-react'
+import { ContextToolbar, ZoomContextToolbar } from './ContextToolbar'
 
 const ARROW_MAX_POINTS = 10
 const ZOOM_ACCENT = '#f59e0b' // amber — matches the zoom panel header
@@ -98,6 +103,8 @@ type CanvasProps = {
   onSelectZoom: (id: string | null) => void
   cameraView: 'frame' | 'live'
   onToggleCameraView: () => void
+  // Floating context toolbar (spec 17 P): "Edit points" for arrow/freehand routes through this.
+  onToggleDraw?: () => void
 }
 
 // === Constants ===
@@ -453,6 +460,7 @@ export default function Canvas({
   onSelectZoom,
   cameraView,
   onToggleCameraView,
+  onToggleDraw,
 }: CanvasProps) {
   const renderCanvasRef = useRef<HTMLCanvasElement>(null)
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null)
@@ -595,8 +603,12 @@ export default function Canvas({
     // camera at the playhead is shown read-only and animates as the playhead moves.
     {
       const framedPose = selectedZoom
-        ? { x: selectedZoom.x, y: selectedZoom.y, scale: selectedZoom.scale }
+        ? zoomTargetPoseAt(selectedZoom, globalTime)
         : resolveCamera(zooms, globalTime)
+      // When parked on one of the selected zoom's keyframes, tint the whole framing overlay with
+      // that keyframe's color (matching the panel pips + timeline diamonds), else amber.
+      const zkfIdx = selectedZoom ? activeZoomKeyframeIndex(selectedZoom, globalTime) : -1
+      const zoomAccent = zkfIdx >= 0 ? keyframeColor(zkfIdx) : ZOOM_ACCENT
       if (selectedZoom != null || !isIdentityCamera(framedPose)) {
         const r = cameraFrameRect(framedPose)
         const rx = r.x * width, ry = r.y * height, rw = r.w * width, rh = r.h * height
@@ -609,7 +621,7 @@ export default function Canvas({
         ctx.restore()
 
         // Framing rectangle border (solid + handles when selected, dashed preview otherwise).
-        ctx.strokeStyle = ZOOM_ACCENT
+        ctx.strokeStyle = zoomAccent
         ctx.lineWidth = selectedZoom ? 3 : 2
         ctx.setLineDash(selectedZoom ? [] : [8, 5])
         ctx.strokeRect(rx, ry, rw, rh)
@@ -622,17 +634,17 @@ export default function Canvas({
           ]
           for (const [hx, hy] of corners) {
             ctx.fillStyle = '#ffffff'
-            ctx.strokeStyle = ZOOM_ACCENT
+            ctx.strokeStyle = zoomAccent
             ctx.lineWidth = 1.5
             ctx.fillRect(hx - hs / 2, hy - hs / 2, hs, hs)
             ctx.strokeRect(hx - hs / 2, hy - hs / 2, hs, hs)
           }
-          // Amount label tab
-          const label = `⛶ ${selectedZoom.scale.toFixed(1)}×`
+          // Amount label tab — shows the keyframe number when on one, plus the live scale.
+          const label = (zkfIdx >= 0 ? `◆ ${zkfIdx + 1}   ` : '') + `⛶ ${framedPose.scale.toFixed(1)}×`
           ctx.font = 'bold 13px sans-serif'
           const tabW = ctx.measureText(label).width + 12
           const tabH = 18
-          ctx.fillStyle = ZOOM_ACCENT
+          ctx.fillStyle = zoomAccent
           ctx.fillRect(rx, ry - tabH, tabW, tabH)
           ctx.fillStyle = '#ffffff'
           ctx.textBaseline = 'middle'
@@ -821,18 +833,25 @@ export default function Canvas({
     return true
   }, [selectedObject, dispatch, onFinishArrow, width, height])
 
-  // Apply an in-progress zoom framing-rect drag (move or resize) as a transient update.
+  // Apply an in-progress zoom framing-rect drag (move or resize) as a transient update. Routes
+  // through editZoomPose so the edit lands correctly: on a keyframe → reshape it; keyframed and
+  // mid-hold → drop a keyframe at the playhead; at hold-start / un-keyframed → move the base pose.
+  // Reads the LIVE zoom (from props) so a keyframe created on the first move is updated in place on
+  // subsequent moves (the same trick object drags use with the live `objects`).
   const applyZoomDrag = useCallback((ds: DragState, nx: number, ny: number) => {
-    if (!ds) return
+    if (!ds || (ds.kind !== 'zoom-move' && ds.kind !== 'zoom-resize')) return
+    const z = zooms?.find((zz) => zz.id === ds.zoomId)
+    if (!z) return
+    const tHold = Math.max(0, Math.min(z.hold, zoomHoldTime(z, globalTime)))
     if (ds.kind === 'zoom-move') {
       const focal = clampFocal(ds.origX + (nx - ds.startNx), ds.origY + (ny - ds.startNy), ds.scale)
-      dispatch({ type: 'UPDATE_ZOOM_TRANSIENT', zoomId: ds.zoomId, updates: { x: focal.x, y: focal.y } })
-    } else if (ds.kind === 'zoom-resize') {
+      dispatch({ type: 'UPDATE_ZOOM_TRANSIENT', zoomId: ds.zoomId, updates: editZoomPose(z, { x: focal.x, y: focal.y }, tHold) })
+    } else {
       const scale = scaleFromCornerDrag(nx, ny, ds.cx, ds.cy)
       const focal = clampFocal(ds.cx, ds.cy, scale)
-      dispatch({ type: 'UPDATE_ZOOM_TRANSIENT', zoomId: ds.zoomId, updates: { scale, x: focal.x, y: focal.y } })
+      dispatch({ type: 'UPDATE_ZOOM_TRANSIENT', zoomId: ds.zoomId, updates: editZoomPose(z, { scale, x: focal.x, y: focal.y }, tHold) })
     }
-  }, [dispatch])
+  }, [dispatch, zooms, globalTime])
 
   const handleMouseDown = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -853,16 +872,18 @@ export default function Canvas({
       // --- Camera zoom editing (Frame view only; Live view is playback-only, R6) ---
       if (!isLive && e.button === 0) {
         if (selectedZoom) {
-          const rect = cameraFrameRect({ x: selectedZoom.x, y: selectedZoom.y, scale: selectedZoom.scale })
+          // The editable rect is the target pose at the playhead (follows the keyframe path).
+          const pose = zoomTargetPoseAt(selectedZoom, globalTime)
+          const rect = cameraFrameRect(pose)
           const corner = hitTestZoomHandle(nx, ny, rect, width, height)
           if (corner) {
-            setDragState({ kind: 'zoom-resize', zoomId: selectedZoom.id, cx: selectedZoom.x, cy: selectedZoom.y })
+            setDragState({ kind: 'zoom-resize', zoomId: selectedZoom.id, cx: pose.x, cy: pose.y })
             return
           }
           if (hitTestZoomBody(nx, ny, rect)) {
             setDragState({
               kind: 'zoom-move', zoomId: selectedZoom.id,
-              startNx: nx, startNy: ny, origX: selectedZoom.x, origY: selectedZoom.y, scale: selectedZoom.scale,
+              startNx: nx, startNy: ny, origX: pose.x, origY: pose.y, scale: pose.scale,
             })
             return
           }
@@ -1047,7 +1068,7 @@ export default function Canvas({
 
       // Zoom framing rect hover (Frame view, zoom selected)
       if (selectedZoom) {
-        const rect = cameraFrameRect({ x: selectedZoom.x, y: selectedZoom.y, scale: selectedZoom.scale })
+        const rect = cameraFrameRect(zoomTargetPoseAt(selectedZoom, globalTime))
         const corner = hitTestZoomHandle(nx, ny, rect, width, height)
         if (corner) {
           setCursor(corner === 'nw' || corner === 'se' ? 'nwse-resize' : 'nesw-resize')
@@ -1215,21 +1236,114 @@ export default function Canvas({
 
   // --- Tooltip text ---
   const tooltipText = useMemo(() => {
-    if (interactionMode !== 'draw' || selectedObject?.type !== 'arrow') return null
+    if (interactionMode !== 'draw') return null
+    // Freehand: a persistent cursor hint so "how do I stop?" is always answered in the render space,
+    // not just on the side panel (matches the arrow's cursor tooltip).
+    if (selectedObject?.type === 'freehand') return 'Drag to draw \u00b7 press Esc to finish'
+    if (selectedObject?.type !== 'arrow') return null
     const data = selectedObject.data as ArrowData
     const count = data.points.length
     const segments = Math.max(0, count - 1)
     if (count >= ARROW_MAX_POINTS - 1) return 'Click to place last point (max reached)'
     if (count === 0) return 'Click to place first point'
-    if (count === 1) return 'Click to add points'
-    return `Click to add points \u00b7 Right-click to finish with ${segments} segment${segments !== 1 ? 's' : ''}`
+    if (count === 1) return 'Click to add points \u00b7 Esc to finish'
+    return `Click to add points \u00b7 Right-click or Esc to finish with ${segments} segment${segments !== 1 ? 's' : ''}`
   }, [interactionMode, selectedObject])
 
   const viewportTransform = `translate(${viewport.panX}px, ${viewport.panY}px) scale(${viewport.scale})`
   const zoomPct = Math.round(viewport.scale * 100)
 
+  // === Floating context toolbar anchoring (spec 17 P1) ===
+  // Hosted here as a NON-transformed sibling of the canvases in the fit box (like the Frame/Live
+  // button), so it isn't scaled by the viewport transform. It anchors to the selected object's
+  // on-screen box, flips below when near the top edge, and clamps within the frame.
+  const toolbarRef = useRef<HTMLDivElement>(null)
+  const [toolbarPos, setToolbarPos] = useState<{ left: number; top: number; side: 'above' | 'below' } | null>(null)
+  // Layout changes (panel/timeline/window resize) don't flow through React deps — a ResizeObserver
+  // on the render area bumps this tick so the anchor recomputes.
+  const [layoutTick, setLayoutTick] = useState(0)
+  useEffect(() => {
+    const el = renderAreaRef.current
+    if (!el) return
+    const ro = new ResizeObserver(() => setLayoutTick((t) => t + 1))
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+
+  // Audio has no canvas box (P4 → its props stay in the inspector). Hide during drag / playback /
+  // Live view / point-drawing (OQ-6) to avoid jitter and occluding the interaction.
+  const toolbarObject = selectedObjectRaw && selectedObjectRaw.type !== 'audio' ? selectedObject : null
+  const showObjectToolbar =
+    !!toolbarObject && !isPlaying && !isLive && dragState == null && interactionMode !== 'draw'
+  // Resolved-pose primitives (not object identity) keep the effect from self-triggering each render.
+  const tbX = toolbarObject?.x, tbY = toolbarObject?.y
+  const tbW = toolbarObject?.width, tbH = toolbarObject?.height, tbR = toolbarObject?.rotation
+
+  // Camera zoom (P5): anchor to the selected zoom's framing rect (Frame view only), same hide rules.
+  const zoomRect = selectedZoom && !isLive ? cameraFrameRect(zoomTargetPoseAt(selectedZoom, globalTime)) : null
+  const showZoomToolbar = !!zoomRect && !isPlaying && dragState == null
+  const zrX = zoomRect?.x, zrY = zoomRect?.y, zrW = zoomRect?.w, zrH = zoomRect?.h
+
+  useLayoutEffect(() => {
+    const fit = fitBoxRef.current
+    const overlay = overlayCanvasRef.current
+    if (!fit || !overlay) { setToolbarPos(null); return }
+
+    // The selection's bounds in project px — an object's (possibly rotated) bbox + its rotate-handle
+    // tip + resize-handle pad, OR the selected zoom's framing rect + the scale/keyframe label tab it
+    // draws above. Whichever is active; object/zoom selection are mutually exclusive.
+    const HANDLE_PAD = HANDLE_SIZE / 2
+    let bounds: { minX: number; minY: number; maxX: number; maxY: number } | null = null
+    if (showObjectToolbar && tbX != null && tbY != null && tbW != null && tbH != null && tbR != null) {
+      const bx = tbX * width, by = tbY * height
+      const bw = tbW * width, bh = tbH * height
+      const ccx = bx + bw / 2, ccy = by + bh / 2
+      const cos = Math.cos(tbR), sin = Math.sin(tbR)
+      const rotTipY = by - ROTATION_HANDLE_DISTANCE - 8 // rotation handle circle above top-center
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+      for (const [px, py] of [
+        [bx, by], [bx + bw, by], [bx + bw, by + bh], [bx, by + bh], [ccx, rotTipY],
+      ] as const) {
+        const dx = px - ccx, dy = py - ccy
+        const rx = ccx + dx * cos - dy * sin
+        const ry = ccy + dx * sin + dy * cos
+        minX = Math.min(minX, rx); maxX = Math.max(maxX, rx)
+        minY = Math.min(minY, ry); maxY = Math.max(maxY, ry)
+      }
+      bounds = { minX: minX - HANDLE_PAD, minY: minY - HANDLE_PAD, maxX: maxX + HANDLE_PAD, maxY: maxY + HANDLE_PAD }
+    } else if (showZoomToolbar && zrX != null && zrY != null && zrW != null && zrH != null) {
+      const rx = zrX * width, ry = zrY * height, rw = zrW * width, rh = zrH * height
+      const ZOOM_TAB = 22 // scale/keyframe label tab drawn above the framing rect (~18px + gap)
+      bounds = { minX: rx - HANDLE_PAD, minY: ry - ZOOM_TAB - HANDLE_PAD, maxX: rx + rw + HANDLE_PAD, maxY: ry + rh + HANDLE_PAD }
+    }
+    if (!bounds) { setToolbarPos(null); return }
+
+    const overlayRect = overlay.getBoundingClientRect() // reflects the viewport transform (spec 16 C)
+    const fitRect = fit.getBoundingClientRect()          // stable under the transform (it's on the canvases)
+    // project px → client (via the overlay rect) → fit-box-local px.
+    const sx = overlayRect.width / width, sy = overlayRect.height / height
+    const cxLocal = (overlayRect.left + (bounds.minX + bounds.maxX) / 2 * sx) - fitRect.left
+    const topLocal = (overlayRect.top + bounds.minY * sy) - fitRect.top
+    const bottomLocal = (overlayRect.top + bounds.maxY * sy) - fitRect.top
+
+    const barW = toolbarRef.current?.offsetWidth ?? 0
+    const barH = toolbarRef.current?.offsetHeight ?? 0
+    const MARGIN = 10, PAD = 6
+    const side: 'above' | 'below' = topLocal - MARGIN - barH < PAD ? 'below' : 'above'
+    const half = barW / 2
+    const minLeft = half + PAD, maxLeft = fitRect.width - half - PAD
+    const left = maxLeft >= minLeft ? Math.max(minLeft, Math.min(maxLeft, cxLocal)) : fitRect.width / 2
+    const top = side === 'above' ? topLocal - MARGIN : bottomLocal + MARGIN
+    setToolbarPos((prev) =>
+      prev && prev.left === left && prev.top === top && prev.side === side ? prev : { left, top, side },
+    )
+  }, [showObjectToolbar, tbX, tbY, tbW, tbH, tbR,
+      showZoomToolbar, zrX, zrY, zrW, zrH,
+      width, height, viewport.scale, viewport.panX, viewport.panY, layoutTick,
+      selectedObjectRaw?.id, selectedObjectRaw?.type, selectedZoomId])
+
   return (
-    <div ref={renderAreaRef} className="flex-1 flex items-center justify-center bg-gray-950 p-4 overflow-hidden">
+    <div ref={renderAreaRef} className="flex-1 flex items-center justify-center bg-bg p-4 pb-20 overflow-hidden">
       <div ref={fitBoxRef} className="relative max-w-full max-h-full" style={{ aspectRatio: `${width}/${height}` }}>
         {/* Both canvases share the SAME editor viewport transform (spec 16 C). CSS transforms don't
             affect layout, so the fit box keeps its size and getBoundingClientRect reflects the
@@ -1264,24 +1378,48 @@ export default function Canvas({
         <button
           onClick={onToggleCameraView}
           title={isLive ? 'Showing the real camera push-in — click for Frame view (V)' : 'Author view — click for Live push-in preview (V)'}
-          className={`absolute top-2 right-2 px-2.5 py-1 text-xs font-semibold rounded shadow cursor-pointer transition-colors ${
+          className={`absolute top-2 right-2 flex items-center gap-1 px-2.5 py-1 text-xs font-semibold rounded shadow cursor-pointer transition-colors ${
             isLive
-              ? 'bg-amber-500 text-black hover:bg-amber-400'
-              : 'bg-gray-800/90 text-gray-200 hover:bg-gray-700'
+              ? 'bg-camera text-black hover:bg-camera/90'
+              : 'bg-surface-muted/90 text-fg hover:bg-surface-hover'
           }`}
         >
-          {isLive ? '● Live' : '○ Frame'}
+          {isLive
+            ? <><IconPlayerPlay size={13} stroke={2} /> Live</>
+            : <><IconViewfinder size={13} stroke={2} /> Frame</>}
         </button>
 
         {/* Editor viewport zoom controls (spec 16 D). Editor-only magnification — never exported.
             Wheel over the canvas zooms to the cursor; middle-drag pans. 100% = fit-to-window. */}
-        <div className="absolute bottom-2 right-2 flex items-center bg-gray-800/90 rounded shadow text-xs text-gray-200 select-none">
-          <button onClick={() => zoomAt(1 / BUTTON_ZOOM_FACTOR)} className="px-2 py-1 hover:bg-gray-700 rounded-l cursor-pointer" title="Zoom out">−</button>
-          <button onClick={resetViewport} className="px-1.5 py-1 min-w-[3.25rem] text-center tabular-nums hover:bg-gray-700 cursor-pointer" title="Reset to Fit (100%)">{zoomPct}%</button>
-          <button onClick={() => zoomAt(BUTTON_ZOOM_FACTOR)} className="px-2 py-1 hover:bg-gray-700 cursor-pointer" title="Zoom in">+</button>
-          <span className="w-px h-4 bg-gray-600" />
-          <button onClick={resetViewport} className="px-2 py-1 hover:bg-gray-700 rounded-r cursor-pointer" title="Fit to window">Fit</button>
+        <div className="absolute bottom-2 right-2 flex items-center bg-surface-muted/90 rounded shadow text-xs text-fg select-none">
+          <button onClick={() => zoomAt(1 / BUTTON_ZOOM_FACTOR)} className="px-2 py-1 inline-flex items-center hover:bg-surface-hover rounded-l cursor-pointer" title="Zoom out"><IconMinus size={14} stroke={2} /></button>
+          <button onClick={resetViewport} className="px-1.5 py-1 min-w-[3.25rem] text-center tabular-nums hover:bg-surface-hover cursor-pointer" title="Reset to Fit (100%)">{zoomPct}%</button>
+          <button onClick={() => zoomAt(BUTTON_ZOOM_FACTOR)} className="px-2 py-1 inline-flex items-center hover:bg-surface-hover cursor-pointer" title="Zoom in"><IconPlus size={14} stroke={2} /></button>
+          <span className="w-px h-4 bg-border-strong" />
+          <button onClick={resetViewport} className="px-2 py-1 hover:bg-surface-hover rounded-r cursor-pointer" title="Fit to window">Fit</button>
         </div>
+
+        {/* Floating context toolbar (spec 17 P) — anchored over the selected object OR camera zoom;
+            centered via translateX(-50%), lifted fully above with translateY(-100%) when placed above.
+            Kept hidden for the first paint until the anchor is measured (avoids a wrong-position flash). */}
+        {(showObjectToolbar || showZoomToolbar) && (
+          <div
+            ref={toolbarRef}
+            className="absolute z-30 pointer-events-auto"
+            style={{
+              left: toolbarPos?.left ?? 0,
+              top: toolbarPos?.top ?? 0,
+              transform: `translate(-50%, ${toolbarPos?.side === 'below' ? '0' : '-100%'})`,
+              visibility: toolbarPos ? 'visible' : 'hidden',
+            }}
+          >
+            {showObjectToolbar && toolbarObject ? (
+              <ContextToolbar object={selectedObjectRaw!} dispatch={dispatch} globalTime={globalTime} onToggleDraw={onToggleDraw} />
+            ) : selectedZoom ? (
+              <ZoomContextToolbar zoom={selectedZoom} dispatch={dispatch} globalTime={globalTime} onSelectZoom={onSelectZoom} />
+            ) : null}
+          </div>
+        )}
       </div>
     </div>
   )

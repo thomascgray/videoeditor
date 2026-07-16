@@ -115,6 +115,7 @@ export type FreehandData = {
 export type AudioData = {
   assetId: string           // reference to asset in asset store
   volume: number            // 0–1
+  muted?: boolean           // when true, this clip's audio is silenced in preview AND export
   originalDuration: number  // seconds — the source file's actual duration
   waveform?: number[]       // ~200 peak values for visualization
   sourceIn?: number         // trim: source seconds where playback begins; default 0 (spec 14)
@@ -124,6 +125,7 @@ export type AudioData = {
 export type VideoData = {
   assetId: string           // reference to asset in asset store
   volume: number            // 0–1
+  muted?: boolean           // when true, the video's audio track is silenced (preview + export); video still shows
   originalDuration: number  // seconds — the source file's actual duration
   sourceIn?: number         // trim: source seconds where playback begins; default 0 (spec 14)
   sourceOut?: number        // trim: source seconds where playback ends; default originalDuration
@@ -138,18 +140,29 @@ export type CameraState = {
   scale: number  // >= 1 (1 = full frame, 2 = 2x punch-in)
 }
 
+// A camera pose waypoint WITHIN a zoom — lets one zoom pan/scale through several poses over its
+// hold, instead of holding a single static pose. `time` is relative to the zoom's HOLD-segment
+// start (startTime + transitionIn), so the ease-in/ease-out ramps stay pure. The zoom's own
+// x/y/scale is the t=0 waypoint (its "home" pose). Mirrors the object Keyframe model.
+export type CameraKeyframe = {
+  time: number         // seconds relative to hold start; when this pose is reached
+  pose: CameraState    // { x, y, scale }
+  easing: EasingKind   // curve for the segment ARRIVING at this keyframe (from the previous one)
+}
+
 // One authored "zoom" — a punch-in envelope. resolveCamera compiles a list of these
 // into a CameraState at each global time. Reuses spec-12 EasingKind.
 export type CameraZoom = {
   id: string
-  x: number              // focal point (normalized 0–1)
+  x: number              // focal point (normalized 0–1) — the home/base pose, reached at hold start
   y: number
   scale: number          // >= 1, the "amount"
   startTime: number      // global seconds — when the ease-in begins
   transitionIn: number   // seconds to ease from the CURRENT camera pose into this target
-  hold: number           // seconds held fully zoomed
+  hold: number           // seconds held (or, when keyframed, the window the pose path plays over)
   transitionOut: number  // seconds to ease back to full frame IF no next zoom takes over first
   easing: EasingKind     // spec-12 curve applied to both in and out ramps
+  keyframes?: CameraKeyframe[] // optional pose path over the hold; created only via "+ Keyframe"
   hidden?: boolean       // spec 14 R11: filtered out of resolveCamera when true; default false
 }
 // Chaining (A->B) is expressed by TIMING: if zoom B's startTime lands while zoom A is still
@@ -274,7 +287,7 @@ export function createTimelineObject(
     width: options?.width ?? 1,
     height: options?.height ?? 1,
     rotation: options?.rotation ?? 0,
-    animateIn: options?.animateIn ?? (type === 'photo' || type === 'audio' || type === 'video' ? 0 : 1),
+    animateIn: options?.animateIn ?? (type === 'photo' || type === 'audio' || type === 'video' || type === 'text' ? 0 : 1),
     style: {
       color: '#FF0000',
       lineWidth: 8,

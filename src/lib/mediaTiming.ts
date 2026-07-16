@@ -12,8 +12,11 @@
 
 import type { AudioData, VideoData } from '../types'
 
-export const RATE_MIN = 0.25
-export const RATE_MAX = 4
+// Playback-speed bounds. Speed is set from the Properties panel slider (the timeline
+// no longer has a speed-drag handle — edges trim only). The slider, the preview
+// playbackRate clamp (clipRate), and export all read these, so they stay in lockstep.
+export const RATE_MIN = 0.2
+export const RATE_MAX = 2
 
 type MediaData = AudioData | VideoData
 
@@ -30,6 +33,12 @@ export function srcOut(d: MediaData): number {
 /** Length of the played source span, in source seconds: sourceOut - sourceIn. */
 export function sourceSpan(d: MediaData): number {
   return srcOut(d) - srcIn(d)
+}
+
+/** Effective audio gain for a clip: its own volume, or 0 when the clip is muted. Read by both
+ *  preview (useAudioPlayback) and every export mixdown, so mute is honored consistently. */
+export function effectiveVolume(d: MediaData): number {
+  return d.muted ? 0 : d.volume
 }
 
 /**
