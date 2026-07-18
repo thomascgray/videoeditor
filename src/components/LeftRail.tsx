@@ -41,8 +41,8 @@ export default function LeftRail({ assets, onAddMedia, onAddAsset, onCreateObjec
 
   return (
     <div className="flex h-full shrink-0 bg-surface border-r border-border">
-      {/* Icon rail */}
-      <div className="flex flex-col items-center w-13 py-2 border-r border-border shrink-0">
+      {/* Icon rail — sits above the pane (z-10) so the active caret can bridge onto the seam. */}
+      <div className="relative z-10 flex flex-col items-center w-13 py-2 border-r border-border shrink-0">
         {SECTIONS.map(({ id, label, Icon }) => {
           const active = section === id && open
           return (
@@ -54,9 +54,19 @@ export default function LeftRail({ assets, onAddMedia, onAddAsset, onCreateObjec
                 active ? 'text-accent' : 'text-muted hover:text-fg'
               }`}
             >
-              {active && <span className="absolute left-0 top-1 bottom-1 w-0.5 rounded-r bg-accent" />}
-              <Icon size={20} stroke={1.8} />
-              {label}
+              {active && (
+                <>
+                  {/* Filled surface + left bar tie the icon to its (open) pane; the caret on the
+                      rail↔pane seam points at the sub-options, so category & options read as one unit. */}
+                  <span className="absolute inset-y-1 left-1.5 right-0 rounded-l-md bg-accent-soft" />
+                  <span className="absolute left-0 top-1 bottom-1 w-0.5 rounded-r bg-accent" />
+                  <span className="absolute right-0 top-1/2 -translate-y-1/2 translate-x-full h-0 w-0 border-y-[5px] border-y-transparent border-l-[6px] border-l-accent" />
+                </>
+              )}
+              <span className="relative z-10 flex flex-col items-center gap-0.5">
+                <Icon size={20} stroke={1.8} />
+                {label}
+              </span>
             </button>
           )
         })}

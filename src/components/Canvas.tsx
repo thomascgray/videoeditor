@@ -1,8 +1,8 @@
 import { useRef, useEffect, useLayoutEffect, useState, useCallback, useMemo } from 'react'
-import type { TimelineObject, InteractionMode, ProjectAction, ArrowData, FreehandData, CameraZoom } from '../types'
+import type { TimelineObject, InteractionMode, ProjectAction, ArrowData, FreehandData, CameraZoom, TextData } from '../types'
 import { useCanvasRenderer } from '../hooks/useCanvasRenderer'
 import type { EditorOptions } from '../lib/renderer'
-import { segmentControlPoint } from '../lib/annotations'
+import { segmentControlPoint, fitText } from '../lib/annotations'
 import { resolvePose, editPose, activeKeyframeIndex, keyframeColor } from '../lib/keyframes'
 import {
   resolveCamera, cameraFrameRect, isIdentityCamera, governingZoomAt,
@@ -115,6 +115,11 @@ const HANDLE_HIT_RADIUS = 14 // canvas pixels, generous for easy clicking
 const MIN_SIZE = 0.01 // minimum object size in normalized coords
 const MIN_ZOOM_SCALE = 1 // full frame (spec 13: scale >= 1 only)
 const MAX_ZOOM_SCALE = 20 // sanity cap for on-canvas resize
+
+// Overlay bleed (spec 18-qol R1): the overlay canvas extends BLEED×frame beyond every edge so an
+// object larger than the frame still shows + can grab its resize/rotate handles in the black margin.
+// Only the overlay grows — the render canvas stays frame-only, so export/preview are unaffected.
+const BLEED = 0.4
 
 // === Coordinate Helpers ===
 
@@ -470,6 +475,15 @@ export default function Canvas({
   const mouseNormRef = useRef<{ nx: number; ny: number } | null>(null)
   const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number } | null>(null)
 
+  // In-place text editing (spec 18-qol R6): double-click a selected text object to edit its content
+  // on the canvas. Ephemeral view state. `editValue` is the live text; the edited object is hidden
+  // from the render (renderObjects) so the textarea is the only visible copy (no double image).
+  const [editingTextId, setEditingTextId] = useState<string | null>(null)
+  const [editValue, setEditValue] = useState('')
+  const [editRect, setEditRect] = useState<{ left: number; top: number; width: number; height: number } | null>(null)
+  const editOriginalRef = useRef('')
+  const measureCtxRef = useRef<CanvasRenderingContext2D | null>(null) // offscreen 2D ctx for auto-size fit
+
   // Editor viewport zoom/pan (spec 16 C). Ephemeral view state — resets to Fit on aspect change.
   const [viewport, setViewport] = useState<ViewportState>(IDENTITY_VIEWPORT)
   const viewportRef = useRef(viewport)
@@ -549,7 +563,12 @@ export default function Canvas({
     activeDrawingObjectId,
     camera: liveCamera,
   }), [isLive, activeDrawingObjectId, liveCamera])
-  useCanvasRenderer(renderCanvasRef, objects, globalTime, isPlaying, width, height, editorOpts)
+  // Hide the text object being edited so only the textarea shows it (spec 18-qol R6 — no double image).
+  const renderObjects = useMemo(
+    () => (editingTextId ? objects.filter((o) => o.id !== editingTextId) : objects),
+    [objects, editingTextId],
+  )
+  useCanvasRenderer(renderCanvasRef, renderObjects, globalTime, isPlaying, width, height, editorOpts)
 
   // Keep dragStateRef in sync for use in event handlers
   dragStateRef.current = dragState
@@ -559,8 +578,9 @@ export default function Canvas({
   useEffect(() => {
     const oc = overlayCanvasRef.current
     if (!oc) return
-    oc.width = width
-    oc.height = height
+    // Enlarged by the bleed margin so out-of-frame chrome has somewhere to paint (R1).
+    oc.width = Math.round(width * (1 + 2 * BLEED))
+    oc.height = Math.round(height * (1 + 2 * BLEED))
   }, [width, height])
 
   const selectedObjectRaw =
@@ -580,6 +600,27 @@ export default function Canvas({
   const selColor = activeKfIdx >= 0 ? keyframeColor(activeKfIdx) : '#4f8ef7'
   const selWidth = activeKfIdx >= 0 ? 3 : 2
 
+  // In-place text editing target (spec 18-qol R6): raw object + keyframe-resolved pose for positioning.
+  const editingObjectRaw = editingTextId ? (objects.find((o) => o.id === editingTextId) ?? null) : null
+  const editingObject = editingObjectRaw ? resolvePose(editingObjectRaw, globalTime) : null
+
+  // Commit the in-place edit as ONE undo entry (only when the content actually changed), then exit
+  // edit mode. Called on blur / Escape / ⌘|Ctrl+Enter.
+  const commitTextEdit = useCallback(() => {
+    const id = editingTextId
+    if (id) {
+      const obj = objects.find((o) => o.id === id)
+      if (obj && obj.type === 'text' && editValue !== editOriginalRef.current) {
+        dispatch({
+          type: 'UPDATE_OBJECT',
+          objectId: id,
+          updates: { data: { ...(obj.data as TextData), content: editValue } },
+        })
+      }
+    }
+    setEditingTextId(null)
+  }, [editingTextId, objects, editValue, dispatch])
+
   // --- Draw overlay ---
   const drawOverlay = useCallback(() => {
     const canvas = overlayCanvasRef.current
@@ -587,7 +628,13 @@ export default function Canvas({
     const ctx = canvas.getContext('2d')
     if (!ctx) return
 
-    ctx.clearRect(0, 0, width, height)
+    // The overlay backing store extends BLEED×frame beyond each edge (R1). Clear the whole store,
+    // then translate the drawing origin to the frame's top-left so every frame-px drawing below
+    // (border, scrim, selection box, handles) is byte-for-byte unchanged and simply lands in the
+    // right place — with out-of-frame handles now inside the enlarged store instead of clipped.
+    ctx.setTransform(1, 0, 0, 1, 0, 0)
+    ctx.clearRect(0, 0, canvas.width, canvas.height)
+    ctx.setTransform(1, 0, 0, 1, BLEED * width, BLEED * height)
 
     // Canvas border
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)'
@@ -858,6 +905,9 @@ export default function Canvas({
       const canvas = overlayCanvasRef.current
       if (!canvas) return
 
+      // While editing text in place, the textarea owns input; a click elsewhere commits via its blur.
+      if (editingTextId) return
+
       // Middle-mouse drag = pan the editor viewport (spec 16 C3). Works in any mode/view.
       if (e.button === 1) {
         e.preventDefault()
@@ -867,7 +917,7 @@ export default function Canvas({
         return
       }
 
-      const { nx, ny } = clientToNorm(e, canvas)
+      const { nx, ny } = clientToNorm(e, renderCanvasRef.current ?? canvas)
 
       // --- Camera zoom editing (Frame view only; Live view is playback-only, R6) ---
       if (!isLive && e.button === 0) {
@@ -981,7 +1031,7 @@ export default function Canvas({
 
       // Clicking empty space does nothing — deselect via Escape or timeline
     },
-    [interactionMode, selectedObject, width, height, dispatch, isLive, selectedZoom, zooms, globalTime, onSelectZoom],
+    [interactionMode, selectedObject, width, height, dispatch, isLive, selectedZoom, zooms, globalTime, onSelectZoom, editingTextId],
   )
 
   const handleMouseMove = useCallback(
@@ -990,11 +1040,11 @@ export default function Canvas({
       if (!canvas) return
       if (panRef.current) return // middle-mouse viewport pan owns the cursor while active
 
-      const { nx, ny } = clientToNorm(e, canvas)
+      const { nx, ny } = clientToNorm(e, renderCanvasRef.current ?? canvas)
       mouseNormRef.current = { nx, ny }
 
-      // Update tooltip position (relative to the canvas container)
-      const rect = canvas.getBoundingClientRect()
+      // Update tooltip position (relative to the frame / render canvas, not the bleed-enlarged overlay).
+      const rect = (renderCanvasRef.current ?? canvas).getBoundingClientRect()
       setTooltipPos({ x: e.clientX - rect.left + 15, y: e.clientY - rect.top + 15 })
 
       const ds = dragStateRef.current
@@ -1119,7 +1169,7 @@ export default function Canvas({
       const canvas = overlayCanvasRef.current
       if (!canvas) return
 
-      const { nx, ny } = clientToNorm(e, canvas)
+      const { nx, ny } = clientToNorm(e, renderCanvasRef.current ?? canvas)
       const ds = dragStateRef.current
       if (!ds) return
 
@@ -1210,7 +1260,7 @@ export default function Canvas({
 
   // --- Double-click: place final point and finish ---
   const handleDoubleClick = useCallback(
-    () => {
+    (e: React.MouseEvent<HTMLCanvasElement>) => {
       if (interactionMode === 'draw' && selectedObject?.type === 'arrow') {
         // The two mousedown events already added two points — remove the extra one
         const data = selectedObject.data as ArrowData
@@ -1223,9 +1273,22 @@ export default function Canvas({
           })
         }
         onFinishArrow?.()
+        return
+      }
+      // R6: double-click a selected text object (Frame view, move mode) → edit its content in place.
+      if (!isLive && interactionMode === 'move' && selectedObject?.type === 'text') {
+        const canvas = overlayCanvasRef.current
+        if (!canvas) return
+        const { nx, ny } = clientToNorm(e, renderCanvasRef.current ?? canvas)
+        if (hitTestObject(nx, ny, selectedObject, width, height)) {
+          const content = (selectedObject.data as TextData).content ?? ''
+          editOriginalRef.current = content
+          setEditValue(content)
+          setEditingTextId(selectedObject.id)
+        }
       }
     },
-    [interactionMode, selectedObject, dispatch, onFinishArrow],
+    [interactionMode, selectedObject, isLive, width, height, dispatch, onFinishArrow],
   )
 
   // --- Mouse leave: hide tooltip ---
@@ -1286,8 +1349,8 @@ export default function Canvas({
 
   useLayoutEffect(() => {
     const fit = fitBoxRef.current
-    const overlay = overlayCanvasRef.current
-    if (!fit || !overlay) { setToolbarPos(null); return }
+    const renderCanvas = renderCanvasRef.current
+    if (!fit || !renderCanvas) { setToolbarPos(null); return }
 
     // The selection's bounds in project px — an object's (possibly rotated) bbox + its rotate-handle
     // tip + resize-handle pad, OR the selected zoom's framing rect + the scale/keyframe label tab it
@@ -1318,22 +1381,54 @@ export default function Canvas({
     }
     if (!bounds) { setToolbarPos(null); return }
 
-    const overlayRect = overlay.getBoundingClientRect() // reflects the viewport transform (spec 16 C)
+    // Use the RENDER canvas rect (the frame) — the overlay is now bleed-enlarged (R1), so its rect no
+    // longer equals the frame and would skew this mapping.
+    const rcRect = renderCanvas.getBoundingClientRect() // the frame; reflects the viewport transform (spec 16 C)
     const fitRect = fit.getBoundingClientRect()          // stable under the transform (it's on the canvases)
-    // project px → client (via the overlay rect) → fit-box-local px.
-    const sx = overlayRect.width / width, sy = overlayRect.height / height
-    const cxLocal = (overlayRect.left + (bounds.minX + bounds.maxX) / 2 * sx) - fitRect.left
-    const topLocal = (overlayRect.top + bounds.minY * sy) - fitRect.top
-    const bottomLocal = (overlayRect.top + bounds.maxY * sy) - fitRect.top
+    // project px → client (via the render-canvas rect) → fit-box-local px.
+    const sx = rcRect.width / width, sy = rcRect.height / height
+    const cxLocal = (rcRect.left + (bounds.minX + bounds.maxX) / 2 * sx) - fitRect.left
+    const topLocal = (rcRect.top + bounds.minY * sy) - fitRect.top
+    const bottomLocal = (rcRect.top + bounds.maxY * sy) - fitRect.top
 
     const barW = toolbarRef.current?.offsetWidth ?? 0
     const barH = toolbarRef.current?.offsetHeight ?? 0
     const MARGIN = 10, PAD = 6
-    const side: 'above' | 'below' = topLocal - MARGIN - barH < PAD ? 'below' : 'above'
+
+    // The visible range = the render area (viewport) in fit-box-local px. The fit box sits inside the
+    // render area's p-4/pb-20 padding, so visTop < 0 and visBottom > fit height — this is the extra
+    // margin the bar may use to stay on-screen (R2). Clamp on BOTH axes to this range.
+    const raRect = renderAreaRef.current?.getBoundingClientRect()
+    const visTop = raRect ? raRect.top - fitRect.top : 0
+    const visBottom = raRect ? raRect.bottom - fitRect.top : fitRect.height
+    const visLeft = raRect ? raRect.left - fitRect.left : 0
+    const visRight = raRect ? raRect.right - fitRect.left : fitRect.width
+
+    // Decide by whether the bar FITS inside the visible range above vs below; if neither fits (a
+    // selection taller than the viewport) pin to the TOP edge, overlapping the selection — keeps it
+    // clear of the transport/timeline at the bottom (R2.2). Pin reuses 'below' anchoring (styled top =
+    // bar's top edge).
+    const roomAbove = topLocal - MARGIN - barH >= visTop + PAD
+    const roomBelow = bottomLocal + MARGIN + barH <= visBottom - PAD
+    const side: 'above' | 'below' = roomAbove ? 'above' : 'below'
+    const pinned = !roomAbove && !roomBelow
+
+    // Bar TOP edge, then clamp into the visible vertical range as a final safety net (R2.3).
+    let barTop = pinned
+      ? visTop + PAD
+      : side === 'above'
+        ? topLocal - MARGIN - barH
+        : bottomLocal + MARGIN
+    barTop = Math.max(visTop + PAD, Math.min(visBottom - barH - PAD, barTop))
+    // Convert back to the styled `top` the JSX expects: 'above' uses translateY(-100%) so its styled
+    // top is the bar's BOTTOM edge; 'below' (and pin) styled top is the bar's TOP edge.
+    const top = side === 'above' ? barTop + barH : barTop
+
+    // Horizontal: center on the selection, clamped to the visible area on both edges.
     const half = barW / 2
-    const minLeft = half + PAD, maxLeft = fitRect.width - half - PAD
-    const left = maxLeft >= minLeft ? Math.max(minLeft, Math.min(maxLeft, cxLocal)) : fitRect.width / 2
-    const top = side === 'above' ? topLocal - MARGIN : bottomLocal + MARGIN
+    const minLeft = visLeft + half + PAD, maxLeft = visRight - half - PAD
+    const left = maxLeft >= minLeft ? Math.max(minLeft, Math.min(maxLeft, cxLocal)) : (visLeft + visRight) / 2
+
     setToolbarPos((prev) =>
       prev && prev.left === left && prev.top === top && prev.side === side ? prev : { left, top, side },
     )
@@ -1341,6 +1436,54 @@ export default function Canvas({
       showZoomToolbar, zrX, zrY, zrW, zrH,
       width, height, viewport.scale, viewport.panX, viewport.panY, layoutTick,
       selectedObjectRaw?.id, selectedObjectRaw?.type, selectedZoomId])
+
+  // Position the in-place text edit field over the object (spec 18-qol R6). Mirrors the toolbar-anchor
+  // mapping: project px → client (render-canvas rect = the frame) → fit-box-local px, so it tracks the
+  // editor viewport zoom/pan.
+  useLayoutEffect(() => {
+    if (!editingObject) { setEditRect(null); return }
+    const rc = renderCanvasRef.current
+    const fit = fitBoxRef.current
+    if (!rc || !fit) { setEditRect(null); return }
+    const rcRect = rc.getBoundingClientRect()
+    const fitRect = fit.getBoundingClientRect()
+    const sx = rcRect.width / width, sy = rcRect.height / height
+    setEditRect({
+      left: (rcRect.left + editingObject.x * width * sx) - fitRect.left,
+      top: (rcRect.top + editingObject.y * height * sy) - fitRect.top,
+      width: editingObject.width * width * sx,
+      height: editingObject.height * height * sy,
+    })
+  }, [editingObject?.id, editingObject?.x, editingObject?.y, editingObject?.width, editingObject?.height,
+      width, height, viewport.scale, viewport.panX, viewport.panY, layoutTick])
+
+  // On-screen font size for the edit field so it matches the rendered text (spec 18-qol R6). Both
+  // cases compute the font in project px exactly as drawText does, then scale to screen (× syScreen).
+  // Auto-size runs the SAME `fitText` fit (font fitted to the box with wrapping) on the live text, so
+  // the edit field tracks the real size instead of ballooning.
+  const editFontPx = (() => {
+    if (!editingObject || !editRect) return 16
+    const style = editingObject.style
+    const data = editingObject.data as TextData
+    const syScreen = editingObject.height > 0 ? editRect.height / (editingObject.height * height) : 1
+    const scaleFactor = Math.sqrt((width * height) / (1920 * 1080))
+    let fontProjectPx: number
+    if (data.autoSize !== false) {
+      if (!measureCtxRef.current) measureCtxRef.current = document.createElement('canvas').getContext('2d')
+      const ctx = measureCtxRef.current
+      const padding = (data.padding ?? 8) * scaleFactor
+      const availW = Math.max(1, editingObject.width * width - padding * 2)
+      const availH = Math.max(1, editingObject.height * height - padding * 2)
+      const fontStyle = style.fontStyle ?? 'normal'
+      const fontWeight = style.fontWeight ?? 'bold'
+      const fontFamily = style.fontFamily ?? 'sans-serif'
+      const fontOf = (size: number) => `${fontStyle} ${fontWeight} ${size}px ${fontFamily}`
+      fontProjectPx = ctx ? fitText(ctx, editValue, fontOf, availW, availH).fontSize : 32 * scaleFactor
+    } else {
+      fontProjectPx = (style.fontSize ?? 32) * scaleFactor
+    }
+    return fontProjectPx * syScreen
+  })()
 
   return (
     <div ref={renderAreaRef} className="flex-1 flex items-center justify-center bg-bg p-4 pb-20 overflow-hidden">
@@ -1355,8 +1498,20 @@ export default function Canvas({
         />
         <canvas
           ref={overlayCanvasRef}
-          className="absolute inset-0 w-full h-full"
-          style={{ cursor, transform: viewportTransform, transformOrigin: '0 0' }}
+          // Grown + offset by the bleed margin (R1) so out-of-frame handles paint & receive mouse
+          // events. transform-origin sits on the frame's top-left (in overlay-local space) so it
+          // scales/pans in lockstep with the render canvas (whose origin is 0 0). Its inner frame
+          // region therefore stays pixel-aligned with the render canvas at every zoom/pan.
+          className="absolute"
+          style={{
+            left: `${-BLEED * 100}%`,
+            top: `${-BLEED * 100}%`,
+            width: `${(1 + 2 * BLEED) * 100}%`,
+            height: `${(1 + 2 * BLEED) * 100}%`,
+            cursor,
+            transform: viewportTransform,
+            transformOrigin: `${(BLEED / (1 + 2 * BLEED)) * 100}% ${(BLEED / (1 + 2 * BLEED)) * 100}%`,
+          }}
           onMouseDown={handleMouseDown}
           onMouseMove={handleMouseMove}
           onMouseUp={handleMouseUp}
@@ -1371,6 +1526,46 @@ export default function Canvas({
           >
             {tooltipText}
           </div>
+        )}
+
+        {/* In-place text editor (spec 18-qol R6). Positioned over the object; the object itself is
+            hidden from the render while editing so this is the only visible copy. App's key handler
+            ignores textarea targets, so Delete/arrows/space/Esc don't mutate the object while typing. */}
+        {editingObject && editRect && (
+          <textarea
+            value={editValue}
+            autoFocus
+            spellCheck={false}
+            onChange={(e) => setEditValue(e.target.value)}
+            onBlur={commitTextEdit}
+            onFocus={(e) => e.currentTarget.select()}
+            onKeyDown={(e) => {
+              e.stopPropagation()
+              // Esc / ⌘|Ctrl+Enter commit; plain Enter inserts a newline (multi-line text boxes).
+              if (e.key === 'Escape' || (e.key === 'Enter' && (e.metaKey || e.ctrlKey))) {
+                e.preventDefault()
+                commitTextEdit()
+              }
+            }}
+            className="absolute z-40 m-0 resize-none overflow-hidden outline-none ring-2 ring-accent rounded-[3px]"
+            style={{
+              left: editRect.left,
+              top: editRect.top,
+              width: editRect.width,
+              height: editRect.height,
+              transform: `rotate(${editingObject.rotation}rad)`,
+              transformOrigin: 'center',
+              background: (editingObject.data as TextData).background ?? 'transparent',
+              color: editingObject.style.color,
+              fontFamily: editingObject.style.fontFamily ?? 'sans-serif',
+              fontWeight: editingObject.style.fontWeight ?? 'bold',
+              fontStyle: editingObject.style.fontStyle ?? 'normal',
+              fontSize: editFontPx,
+              lineHeight: 1.25,
+              textAlign: ((editingObject.data as TextData).align ?? 'center') as React.CSSProperties['textAlign'],
+              padding: ((editingObject.data as TextData).padding ?? 8) * (editingObject.height > 0 ? editRect.height / (editingObject.height * height) : 1),
+            }}
+          />
         )}
 
         {/* Frame / Live camera view toggle (spec 13, R7). Frame = author un-zoomed with a framing

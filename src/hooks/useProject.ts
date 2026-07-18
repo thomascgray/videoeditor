@@ -4,6 +4,7 @@ import { createDefaultProject } from '../types'
 import { poseAt, KF_EPS } from '../lib/keyframes'
 import { srcIn, srcOut, sourceSpan } from '../lib/mediaTiming'
 import { saveProject, loadProject } from '../lib/projectStorage'
+import { loadCanvasSize, saveCanvasSize } from '../lib/canvasSizePref'
 import { config } from '../config'
 
 /**
@@ -251,7 +252,7 @@ function applyAction(project: Project, action: ProjectAction): Project {
 export function useProject() {
   const [state, dispatch] = useReducer(projectReducer, null, () => ({
     past: [],
-    present: config.persistProject ? loadProject() : createDefaultProject(),
+    present: config.persistProject ? loadProject() : createDefaultProject(loadCanvasSize() ?? undefined),
     future: [],
     transientSnapshot: null,
   }))
@@ -266,6 +267,12 @@ export function useProject() {
     }, 1000)
     return () => clearTimeout(saveTimeoutRef.current)
   }, [state.present])
+
+  // Remember the canvas size for the next new project (spec 18-qol R3). This preference persists
+  // independently of `config.persistProject`, undo/redo, and `.brep` export — mirrors `useUiPrefs`.
+  useEffect(() => {
+    saveCanvasSize({ width: state.present.width, height: state.present.height })
+  }, [state.present.width, state.present.height])
 
   const canUndo = state.past.length > 0
   const canRedo = state.future.length > 0

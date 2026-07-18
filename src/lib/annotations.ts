@@ -205,7 +205,7 @@ function wrapText(ctx: CanvasRenderingContext2D, content: string, maxWidth: numb
  * Find the largest font size (px) whose wrapped layout fits within maxW × maxH, then return that
  * size and its wrapped lines. Binary search over integer sizes — ~9 iterations.
  */
-function fitText(
+export function fitText(
   ctx: CanvasRenderingContext2D,
   content: string,
   fontOf: (size: number) => string,
@@ -292,7 +292,14 @@ export function drawText(
   // solid panel behind the text regardless of the text's length or alignment.
   if (data.background) {
     ctx.fillStyle = data.background
-    ctx.fillRect(bx, by, bw, bh)
+    const r = Math.max(0, Math.min((data.cornerRadius ?? 0) * scaleFactor, bw / 2, bh / 2))
+    if (r > 0) {
+      ctx.beginPath()
+      ctx.roundRect(bx, by, bw, bh, r)
+      ctx.fill()
+    } else {
+      ctx.fillRect(bx, by, bw, bh)
+    }
   }
 
   ctx.fillStyle = style.color

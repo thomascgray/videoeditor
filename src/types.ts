@@ -104,6 +104,8 @@ export type TextData = {
   align?: TextAlign     // horizontal alignment of wrapped lines; default 'center'
   autoSize?: boolean    // when true (default), font size is auto-fit to fill the box; when
                         // false, style.fontSize is used verbatim (lines still wrap to width)
+  cornerRadius?: number // px (project-space, pre-scaleFactor) radius for the background panel corners;
+                        // default 0/undefined = square (fillRect). Clamped to half the box in drawText.
 }
 
 export type ShapeData = Record<string, never>
@@ -226,13 +228,13 @@ export type ProjectAction =
 
 // === Factory Functions ===
 
-export function createDefaultProject(): Project {
+export function createDefaultProject(size?: { width: number; height: number }): Project {
   return {
     id: crypto.randomUUID(),
     name: 'Untitled Project',
     fps: 30,
-    width: 1920,
-    height: 1080,
+    width: size?.width ?? 1920,
+    height: size?.height ?? 1080,
     objects: [],
     assets: [],
   }

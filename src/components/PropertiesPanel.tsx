@@ -405,6 +405,51 @@ export default function PropertiesPanel({ object: obj, zoom, dispatch, globalTim
               <NumberInput value={obj.style.fontSize ?? 32} min={8} max={200} step={1} onChange={(v) => updateStyle({ fontSize: v })} />
             </Field>
           )}
+          {obj.type === 'text' && (
+            <Field label="Background">
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={(obj.data as TextData).background != null}
+                  onChange={(e) => {
+                    const data = obj.data as TextData
+                    const next = e.target.checked ? (data.background ?? '#000000') : undefined
+                    updateData({ background: next }, { background: next })
+                  }}
+                  className="accent-accent cursor-pointer"
+                />
+                {(obj.data as TextData).background != null && (
+                  <input
+                    type="color"
+                    value={(obj.data as TextData).background ?? '#000000'}
+                    onChange={(e) => updateData({ background: e.target.value }, { background: e.target.value })}
+                    className="w-8 h-6 bg-transparent border-none cursor-pointer"
+                  />
+                )}
+              </div>
+            </Field>
+          )}
+          {/* Corner radius rounds the background panel; only meaningful when a background is set. */}
+          {obj.type === 'text' && (obj.data as TextData).background != null && (
+            <Field label="Corner radius">
+              <div className="flex items-center gap-2 w-full">
+                <input
+                  type="range"
+                  min={0} max={200} step={1}
+                  value={(obj.data as TextData).cornerRadius ?? 0}
+                  onChange={(e) => {
+                    const cornerRadius = Number(e.target.value)
+                    updateData({ cornerRadius }, { cornerRadius })
+                  }}
+                  onDoubleClick={() => updateData({ cornerRadius: 0 }, { cornerRadius: 0 })}
+                  className="w-full"
+                />
+                <span className="text-[10px] text-subtle tabular-nums w-8 text-right">
+                  {(obj.data as TextData).cornerRadius ?? 0}
+                </span>
+              </div>
+            </Field>
+          )}
         </Accordion>
       )}
 
@@ -466,28 +511,6 @@ export default function PropertiesPanel({ object: obj, zoom, dispatch, globalTim
               onChange={(e) => updateStyle({ fontStyle: e.target.checked ? 'italic' : 'normal' })}
               className="accent-accent cursor-pointer"
             />
-          </Field>
-          <Field label="Background">
-            <div className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                checked={(obj.data as TextData).background != null}
-                onChange={(e) => {
-                  const data = obj.data as TextData
-                  const next = e.target.checked ? (data.background ?? '#000000') : undefined
-                  updateData({ background: next }, { background: next })
-                }}
-                className="accent-accent cursor-pointer"
-              />
-              {(obj.data as TextData).background != null && (
-                <input
-                  type="color"
-                  value={(obj.data as TextData).background ?? '#000000'}
-                  onChange={(e) => updateData({ background: e.target.value }, { background: e.target.value })}
-                  className="w-8 h-6 bg-transparent border-none cursor-pointer"
-                />
-              )}
-            </div>
           </Field>
         </Accordion>
       )}
@@ -757,8 +780,8 @@ const SECTION_ICONS: Record<string, React.ReactNode> = {
   Focus: <IconFocusCentered size={15} stroke={2} />,
 }
 
-function Accordion({ title, children }: { title: string; children: React.ReactNode }) {
-  const [open, setOpen] = useState(true)
+function Accordion({ title, children, defaultOpen = false }: { title: string; children: React.ReactNode; defaultOpen?: boolean }) {
+  const [open, setOpen] = useState(defaultOpen)
   return (
     <div className="mb-2 overflow-hidden rounded-lg border border-border bg-surface-muted/40">
       <button
