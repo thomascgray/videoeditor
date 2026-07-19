@@ -97,6 +97,23 @@ export type ArrowData = {
 
 export type TextAlign = 'left' | 'center' | 'right' | 'justify'
 
+// Tier 1 (static) + Tier 2 (animated) text effects (spec 19). Absent = plain fill (today).
+// Every variant is a deterministic pure fn of (data, clip-relative time) rendered in Canvas 2D, so
+// preview and export stay pixel-identical (R-DET). Animated kinds use clip-relative time.
+export type TextEffect =
+  // Tier 1 — static
+  | { kind: 'glow';     color: string; blur: number }                 // px blur (project-space, * scaleFactor)
+  | { kind: 'outline';  color: string; width: number }                // px stroke width (project-space)
+  | { kind: 'shadow';   color: string; dx: number; dy: number; blur: number } // px offsets/blur (project-space)
+  | { kind: 'gradient'; from: string; to: string; angle: number }     // linear gradient fill; angle in degrees
+  // Tier 2 — animated (time-driven; pure fn of clip time)
+  | { kind: 'pulse';    speed: number; amount: number }               // scale + opacity oscillation
+  | { kind: 'rainbow';  speed: number }                               // fill hue cycle
+  | { kind: 'wave';     speed: number; amplitude: number }            // per-glyph vertical travel (px, project-space)
+  | { kind: 'shimmer';  speed: number; color: string }                // sweeping highlight band
+
+export type TextEffectKind = TextEffect['kind']
+
 export type TextData = {
   content: string
   background?: string
@@ -106,6 +123,7 @@ export type TextData = {
                         // false, style.fontSize is used verbatim (lines still wrap to width)
   cornerRadius?: number // px (project-space, pre-scaleFactor) radius for the background panel corners;
                         // default 0/undefined = square (fillRect). Clamped to half the box in drawText.
+  effect?: TextEffect   // spec 19: optional visual effect beyond plain fill. Absent = rendered as today.
 }
 
 export type ShapeData = Record<string, never>

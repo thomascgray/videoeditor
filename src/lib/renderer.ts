@@ -70,16 +70,16 @@ export function renderFrame(
 
     // Active drawing object: full opacity, no ghost
     if (activeDrawingObjectId === obj.id) {
-      drawObject(ctx, obj, 1.0, w, h, imageCache)
+      drawObject(ctx, obj, 1.0, w, h, imageCache, elapsed)
     } else if (editorMode && progress < 1 && obj.type !== 'photo') {
       // Ghost preview: two-pass rendering for editor mode.
       // Pass 1: ghost of full shape at reduced opacity
       const ghostStyle = { ...obj.style, opacity: obj.style.opacity * GHOST_ALPHA }
-      drawObject(ctx, obj, 1.0, w, h, imageCache, ghostStyle)
+      drawObject(ctx, obj, 1.0, w, h, imageCache, elapsed, ghostStyle)
       // Pass 2: animated portion at full opacity
-      drawObject(ctx, obj, progress, w, h, imageCache)
+      drawObject(ctx, obj, progress, w, h, imageCache, elapsed)
     } else {
-      drawObject(ctx, obj, progress, w, h, imageCache)
+      drawObject(ctx, obj, progress, w, h, imageCache, elapsed)
     }
 
     ctx.restore()
@@ -93,6 +93,7 @@ function drawObject(
   w: number,
   h: number,
   imageCache: Map<string, HTMLImageElement | HTMLVideoElement | ImageBitmap | VideoFrame>,
+  time: number,   // clip-relative seconds (globalTime - startTime); only drawText uses it (spec 19)
   styleOverride?: ObjectStyle,
 ) {
   const style = styleOverride ?? obj.style
@@ -132,7 +133,7 @@ function drawObject(
       drawArrow(ctx, obj.data as ArrowData, style, progress, bx, by, bw, bh, scaleFactor)
       break
     case 'text':
-      drawText(ctx, obj.data as TextData, style, progress, bx, by, bw, bh, scaleFactor)
+      drawText(ctx, obj.data as TextData, style, progress, bx, by, bw, bh, scaleFactor, time)
       break
     case 'rectangle':
       drawRectangle(ctx, style, progress, bx, by, bw, bh, scaleFactor)

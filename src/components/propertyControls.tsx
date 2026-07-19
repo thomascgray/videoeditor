@@ -1,7 +1,7 @@
 import { useRef } from 'react'
 import type {
   TimelineObject, EasingKind, Transition, TransitionKind, SlideDirection, Keyframe,
-  CameraZoom, CameraKeyframe,
+  CameraZoom, CameraKeyframe, TextEffect, TextEffectKind,
 } from '../types'
 import { keyframeColor, defaultTransitionEasing } from '../lib/keyframes'
 import { clamp01 } from '../lib/easing'
@@ -174,6 +174,157 @@ export function TransitionFields({
                 occupies — filled from the start (enter) or the end (exit). */}
             <LifespanBar duration={objDuration} portion={dur} align={phase === 'in' ? 'left' : 'right'} />
           </div>
+        </>
+      )}
+    </>
+  )
+}
+
+// --- Text effects (spec 19) -----------------------------------------------------------------
+export const TEXT_EFFECT_KINDS: TextEffectKind[] = [
+  'glow', 'outline', 'shadow', 'gradient', 'pulse', 'rainbow', 'wave', 'shimmer',
+]
+export const TEXT_EFFECT_LABELS: Record<TextEffectKind, string> = {
+  glow: 'Glow / Neon',
+  outline: 'Outline',
+  shadow: 'Drop shadow',
+  gradient: 'Gradient fill',
+  pulse: 'Pulse',
+  rainbow: 'Rainbow',
+  wave: 'Wave',
+  shimmer: 'Shimmer',
+}
+// Sensible starting params per kind — picking a kind seeds these; each param stays editable.
+export const DEFAULT_TEXT_EFFECT: Record<TextEffectKind, TextEffect> = {
+  glow: { kind: 'glow', color: '#3b82f6', blur: 16 },
+  outline: { kind: 'outline', color: '#000000', width: 3 },
+  shadow: { kind: 'shadow', color: '#000000', dx: 4, dy: 4, blur: 6 },
+  gradient: { kind: 'gradient', from: '#ff6ec4', to: '#7873f5', angle: 0 },
+  pulse: { kind: 'pulse', speed: 1, amount: 1 },
+  rainbow: { kind: 'rainbow', speed: 1 },
+  wave: { kind: 'wave', speed: 1, amplitude: 12 },
+  shimmer: { kind: 'shimmer', speed: 1, color: '#ffffff' },
+}
+
+function ColorRow({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
+  return (
+    <Field label={label}>
+      <input
+        type="color"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="w-8 h-6 rounded border border-border bg-surface-muted cursor-pointer"
+      />
+    </Field>
+  )
+}
+
+function SliderRow({
+  label, value, min, max, step, onChange, fmt,
+}: {
+  label: string; value: number; min: number; max: number; step: number
+  onChange: (v: number) => void; fmt?: (v: number) => string
+}) {
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-1">
+        <label className="text-muted text-xs">{label}</label>
+        <span className="text-[10px] text-subtle tabular-nums">{fmt ? fmt(value) : value}</span>
+      </div>
+      <input
+        type="range" min={min} max={max} step={step} value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+        className="w-full"
+      />
+    </div>
+  )
+}
+
+/**
+ * Effect picker + per-kind params for a text object (spec 19). Modeled on `TransitionFields`:
+ * a kind dropdown ("None" removes the effect) plus the params that apply to the chosen kind.
+ * `value`/`onChange` carry the whole `TextEffect` (or undefined); the parent wires undo/persist.
+ */
+export function EffectFields({
+  value, onChange,
+}: {
+  value?: TextEffect
+  onChange: (e?: TextEffect) => void
+}) {
+  const kind = value?.kind ?? 'none'
+  // Merge a partial into the current effect (same kind guaranteed by the UI branch).
+  const patch = (p: Partial<Record<string, unknown>>) => {
+    if (value) onChange({ ...value, ...p } as TextEffect)
+  }
+  return (
+    <>
+      <Field label="Effect">
+        <select
+          value={kind}
+          onChange={(e) => {
+            const k = e.target.value
+            onChange(k === 'none' ? undefined : DEFAULT_TEXT_EFFECT[k as TextEffectKind])
+          }}
+          className={SELECT_CLS}
+        >
+          <option value="none">None</option>
+          {TEXT_EFFECT_KINDS.map((k) => <option key={k} value={k}>{TEXT_EFFECT_LABELS[k]}</option>)}
+        </select>
+      </Field>
+
+      {value?.kind === 'glow' && (
+        <>
+          <ColorRow label="Colour" value={value.color} onChange={(color) => patch({ color })} />
+          <SliderRow label="Blur" value={value.blur} min={2} max={40} step={1} onChange={(blur) => patch({ blur })} />
+        </>
+      )}
+      {value?.kind === 'outline' && (
+        <>
+          <ColorRow label="Colour" value={value.color} onChange={(color) => patch({ color })} />
+          <SliderRow label="Width" value={value.width} min={0.5} max={12} step={0.5} onChange={(width) => patch({ width })}
+            fmt={(v) => v.toFixed(1)} />
+        </>
+      )}
+      {value?.kind === 'shadow' && (
+        <>
+          <ColorRow label="Colour" value={value.color} onChange={(color) => patch({ color })} />
+          <SliderRow label="Offset X" value={value.dx} min={-30} max={30} step={1} onChange={(dx) => patch({ dx })} />
+          <SliderRow label="Offset Y" value={value.dy} min={-30} max={30} step={1} onChange={(dy) => patch({ dy })} />
+          <SliderRow label="Blur" value={value.blur} min={0} max={30} step={1} onChange={(blur) => patch({ blur })} />
+        </>
+      )}
+      {value?.kind === 'gradient' && (
+        <>
+          <ColorRow label="From" value={value.from} onChange={(from) => patch({ from })} />
+          <ColorRow label="To" value={value.to} onChange={(to) => patch({ to })} />
+          <SliderRow label="Angle" value={value.angle} min={0} max={360} step={5} onChange={(angle) => patch({ angle })}
+            fmt={(v) => `${v}°`} />
+        </>
+      )}
+      {value?.kind === 'pulse' && (
+        <>
+          <SliderRow label="Speed" value={value.speed} min={0.1} max={4} step={0.1} onChange={(speed) => patch({ speed })}
+            fmt={(v) => v.toFixed(1)} />
+          <SliderRow label="Amount" value={value.amount} min={0.1} max={2} step={0.1} onChange={(amount) => patch({ amount })}
+            fmt={(v) => v.toFixed(1)} />
+        </>
+      )}
+      {value?.kind === 'rainbow' && (
+        <SliderRow label="Speed" value={value.speed} min={0.1} max={4} step={0.1} onChange={(speed) => patch({ speed })}
+          fmt={(v) => v.toFixed(1)} />
+      )}
+      {value?.kind === 'wave' && (
+        <>
+          <SliderRow label="Speed" value={value.speed} min={0.1} max={4} step={0.1} onChange={(speed) => patch({ speed })}
+            fmt={(v) => v.toFixed(1)} />
+          <SliderRow label="Amplitude" value={value.amplitude} min={1} max={40} step={1} onChange={(amplitude) => patch({ amplitude })} />
+        </>
+      )}
+      {value?.kind === 'shimmer' && (
+        <>
+          <ColorRow label="Highlight" value={value.color} onChange={(color) => patch({ color })} />
+          <SliderRow label="Speed" value={value.speed} min={0.1} max={4} step={0.1} onChange={(speed) => patch({ speed })}
+            fmt={(v) => v.toFixed(1)} />
         </>
       )}
     </>

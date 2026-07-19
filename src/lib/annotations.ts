@@ -1,4 +1,4 @@
-import type { ArrowData, TextData, FreehandData, ObjectStyle } from '../types'
+import type { ArrowData, TextData, FreehandData, ObjectStyle, TextEffect } from '../types'
 
 /** Compute the quadratic bezier control point for a segment with curvature */
 function segmentControlPoint(
@@ -245,6 +245,7 @@ export function drawText(
   bw: number,
   bh: number,
   scaleFactor: number,
+  time = 0,   // clip-relative seconds; drives Tier 2 animated effects (spec 19). 0 = static.
 ) {
   const full = data.content ?? ''
   const fontFamily = style.fontFamily ?? 'sans-serif'
@@ -302,34 +303,174 @@ export function drawText(
     }
   }
 
-  ctx.fillStyle = style.color
-  let remaining = revealChars
-  lines.forEach((l, i) => {
-    const y = firstLineY + i * lineHeight
-    const take = Math.max(0, Math.min(remaining, l.text.length))
-    remaining -= l.text.length
-    if (take <= 0) return
+  // --- Text effects (spec 19) ---------------------------------------------------------------
+  // Effects wrap the glyph fill loop and are a pure fn of (data, clip-relative `time`), so preview
+  // and export stay pixel-identical (R-DET). The background panel above already drew; effects only
+  // touch the glyphs. Everything is fully reset by the outer ctx.restore() below (all state is set
+  // inside this save scope), so nothing leaks to later objects.
+  const effect = data.effect
 
-    // Justify only fully-revealed, non-final lines that actually have gaps.
-    if (align === 'justify' && !l.paragraphEnd && take >= l.text.length && l.text.includes(' ')) {
-      const words = l.text.split(' ')
-      const wordsWidth = words.reduce((s, w) => s + ctx.measureText(w).width, 0)
-      const gaps = words.length - 1
-      const extra = gaps > 0 ? (rightX - leftX - wordsWidth) / gaps : 0
-      let x = leftX
-      for (const w of words) {
-        ctx.fillText(w, x, y)
-        x += ctx.measureText(w).width + extra
+  // Fill style: solid style.color by default; gradient/rainbow/shimmer override it spatially/over time.
+  let fillStyle: string | CanvasGradient = style.color
+  // Outline draws a stroke under each glyph fill; null = no outline.
+  let outline: { color: string; width: number } | null = null
+  // Wave: per-glyph vertical offset keyed by the glyph's index in the full text (so it doesn't
+  // shift as the typewriter reveal advances). null = flat baseline (whole-substring fillText).
+  let waveFn: ((charIndex: number) => number) | null = null
+  // Number of times to repaint every glyph — glow stacks passes to intensify the blur halo.
+  let passes = 1
+
+  if (effect) {
+    switch (effect.kind) {
+      case 'glow':
+        ctx.shadowColor = effect.color
+        ctx.shadowBlur = effect.blur * scaleFactor
+        ctx.shadowOffsetX = 0
+        ctx.shadowOffsetY = 0
+        passes = 3 // repaint to deepen the halo
+        break
+      case 'outline':
+        outline = { color: effect.color, width: effect.width * scaleFactor }
+        break
+      case 'shadow':
+        ctx.shadowColor = effect.color
+        ctx.shadowBlur = effect.blur * scaleFactor
+        ctx.shadowOffsetX = effect.dx * scaleFactor
+        ctx.shadowOffsetY = effect.dy * scaleFactor
+        break
+      case 'gradient':
+        fillStyle = buildGradient(ctx, effect, bx, by, bw, bh)
+        break
+      case 'rainbow': {
+        // Full hue sweep every (4 / speed) seconds; deterministic from clip time.
+        const hue = (((time * effect.speed * 90) % 360) + 360) % 360
+        fillStyle = `hsl(${hue}, 90%, 60%)`
+        break
       }
-      return
+      case 'wave': {
+        const amp = effect.amplitude * scaleFactor
+        waveFn = (i) => amp * Math.sin(time * effect.speed * 3 - i * 0.5)
+        break
+      }
+      case 'shimmer':
+        fillStyle = buildShimmer(ctx, style.color, effect, time, bx, bw)
+        break
+      case 'pulse': {
+        // Scale + opacity oscillation about the text-box center, wrapping the whole glyph loop.
+        const osc = Math.sin(2 * Math.PI * effect.speed * time)
+        const k = 1 + effect.amount * 0.15 * osc
+        const cx = bx + bw / 2
+        const cy = by + bh / 2
+        ctx.translate(cx, cy)
+        ctx.scale(k, k)
+        ctx.translate(-cx, -cy)
+        ctx.globalAlpha *= 1 - effect.amount * 0.25 * (0.5 - 0.5 * osc)
+        break
+      }
     }
+  }
 
-    // Align by the FULL line width so revealing letters stay put; draw the visible substring.
-    const fullWidth = ctx.measureText(l.text).width
-    const sx = align === 'right' ? rightX - fullWidth : align === 'center' ? centerX - fullWidth / 2 : leftX
-    ctx.fillText(l.text.slice(0, take), sx, y)
-  })
+  if (outline) {
+    ctx.lineJoin = 'round'
+    ctx.lineWidth = outline.width
+    ctx.strokeStyle = outline.color
+  }
+
+  // Paint one run of text at (x, baseY). Per-glyph when waving; a single fillText otherwise.
+  // `charBase` is the run's first glyph index within the full text (for wave phase continuity).
+  const paintRun = (text: string, x: number, baseY: number, charBase: number): number => {
+    if (waveFn) {
+      let cx = x
+      for (let i = 0; i < text.length; i++) {
+        const ch = text[i]
+        const gy = baseY + waveFn(charBase + i)
+        if (outline) ctx.strokeText(ch, cx, gy)
+        ctx.fillText(ch, cx, gy)
+        cx += ctx.measureText(ch).width
+      }
+      return cx
+    }
+    if (outline) ctx.strokeText(text, x, baseY)
+    ctx.fillText(text, x, baseY)
+    return x + ctx.measureText(text).width
+  }
+
+  const renderLines = () => {
+    let remaining = revealChars
+    let lineStart = 0 // running glyph index at the start of each line (full text)
+    lines.forEach((l, i) => {
+      const y = firstLineY + i * lineHeight
+      const take = Math.max(0, Math.min(remaining, l.text.length))
+      remaining -= l.text.length
+      const thisLineStart = lineStart
+      lineStart += l.text.length
+      if (take <= 0) return
+
+      // Justify only fully-revealed, non-final lines that actually have gaps.
+      if (align === 'justify' && !l.paragraphEnd && take >= l.text.length && l.text.includes(' ')) {
+        const words = l.text.split(' ')
+        const wordsWidth = words.reduce((s, w) => s + ctx.measureText(w).width, 0)
+        const gaps = words.length - 1
+        const extra = gaps > 0 ? (rightX - leftX - wordsWidth) / gaps : 0
+        let x = leftX
+        let charAt = thisLineStart
+        for (const w of words) {
+          paintRun(w, x, y, charAt)
+          x += ctx.measureText(w).width + extra
+          charAt += w.length + 1 // + the space that split() consumed
+        }
+        return
+      }
+
+      // Align by the FULL line width so revealing letters stay put; draw the visible substring.
+      const fullWidth = ctx.measureText(l.text).width
+      const sx = align === 'right' ? rightX - fullWidth : align === 'center' ? centerX - fullWidth / 2 : leftX
+      paintRun(l.text.slice(0, take), sx, y, thisLineStart)
+    })
+  }
+
+  ctx.fillStyle = fillStyle
+  for (let p = 0; p < passes; p++) renderLines()
   ctx.restore()
+}
+
+/** Build a linear-gradient fill across the text box along `effect.angle` (degrees). */
+function buildGradient(
+  ctx: CanvasRenderingContext2D,
+  effect: Extract<TextEffect, { kind: 'gradient' }>,
+  bx: number, by: number, bw: number, bh: number,
+): CanvasGradient {
+  const a = (effect.angle * Math.PI) / 180
+  const cx = bx + bw / 2
+  const cy = by + bh / 2
+  const half = Math.sqrt(bw * bw + bh * bh) / 2
+  const dx = Math.cos(a) * half
+  const dy = Math.sin(a) * half
+  const g = ctx.createLinearGradient(cx - dx, cy - dy, cx + dx, cy + dy)
+  g.addColorStop(0, effect.from)
+  g.addColorStop(1, effect.to)
+  return g
+}
+
+/** Build a horizontal gradient with a bright band that sweeps left→right over clip time. */
+function buildShimmer(
+  ctx: CanvasRenderingContext2D,
+  base: string,
+  effect: Extract<TextEffect, { kind: 'shimmer' }>,
+  time: number, bx: number, bw: number,
+): CanvasGradient {
+  const g = ctx.createLinearGradient(bx, 0, bx + bw, 0)
+  const clamp01 = (v: number) => Math.max(0, Math.min(1, v))
+  // Band center travels from -0.2 to 1.2 (off-edge to off-edge) each loop.
+  const phase = ((time * effect.speed) % 1 + 1) % 1
+  const center = phase * 1.4 - 0.2
+  const band = 0.15
+  g.addColorStop(0, base)
+  g.addColorStop(clamp01(center - band), base)
+  g.addColorStop(clamp01(center), effect.color)
+  g.addColorStop(clamp01(center + band), base)
+  g.addColorStop(1, base)
+  return g
 }
 
 export function drawRectangle(

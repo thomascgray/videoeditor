@@ -17,7 +17,7 @@ import { clamp01 } from '../lib/easing'
 import { srcIn, srcOut, sourceSpan, RATE_MIN, RATE_MAX } from '../lib/mediaTiming'
 import { rememberObjectStyle, rememberObjectData } from '../lib/objectDefaults'
 import {
-  Field, NumberInput, TransitionFields, TypeOnBar,
+  Field, NumberInput, TransitionFields, TypeOnBar, EffectFields,
   KeyframeTrack, KeyframeStatus, ZoomKeyframeTrack, EASINGS, EASING_LABELS, SELECT_CLS,
 } from './propertyControls'
 
@@ -512,6 +512,16 @@ export default function PropertiesPanel({ object: obj, zoom, dispatch, globalTim
               className="accent-accent cursor-pointer"
             />
           </Field>
+        </Accordion>
+      )}
+
+      {/* Text effects (spec 19): one effect per text object; "None" removes it. */}
+      {obj.type === 'text' && (
+        <Accordion title="Effects">
+          <EffectFields
+            value={(obj.data as TextData).effect}
+            onChange={(effect) => updateData({ effect }, { effect })}
+          />
         </Accordion>
       )}
 
