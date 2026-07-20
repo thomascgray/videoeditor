@@ -1,9 +1,11 @@
 import { useRef, useCallback, useState, useEffect } from 'react'
-import type { TimelineObject, ProjectAction, AudioData, VideoData, CameraZoom } from '../types'
+import { createPortal } from 'react-dom'
+import type { TimelineObject, ProjectAction, AudioData, VideoData, CameraZoom, Marker } from '../types'
 import { keyframeColor } from '../lib/keyframes'
 import { zoomEnvelope } from '../lib/camera'
 import { sourceSpan, srcIn, srcOut } from '../lib/mediaTiming'
-import { IconChevronDown, IconPlus, IconX, IconViewfinder, IconEye, IconEyeOff } from '@tabler/icons-react'
+import { snapTime, snapClipMove, SNAP_THRESHOLD_PX } from '../lib/snapping'
+import { IconChevronDown, IconPlus, IconX, IconViewfinder, IconEye, IconEyeOff, IconTrash } from '@tabler/icons-react'
 
 type TimelineProps = {
   objects: TimelineObject[]
@@ -17,11 +19,13 @@ type TimelineProps = {
   zooms?: CameraZoom[]
   selectedZoomId: string | null
   onSelectZoom: (id: string | null) => void
+  // Timeline markers (spec 22). Retime/edit/delete are dispatched directly (like zooms).
+  markers?: Marker[]
   // Collapse the timeline to a slim bar (spec 16 B3). App owns the collapsed state + height.
   onCollapse?: () => void
 }
 
-const LANE_HEIGHT = 32
+const LANE_HEIGHT = 40
 const LANE_GAP = 2
 const RULER_HEIGHT = 24
 const CAMERA_TRACK_HEIGHT = 32
@@ -29,8 +33,15 @@ const GUTTER_WIDTH = 32
 const MIN_PIXELS_PER_SECOND = 2
 const MAX_PIXELS_PER_SECOND = 400
 const DEFAULT_PIXELS_PER_SECOND = 80
+// Wheel-zoom sensitivity: zoom factor = exp(-deltaY_px * this). ~0.0012 makes a mouse notch (~100px)
+// a gentle ~11% step while a trackpad's tiny deltas stay proportional (was a fixed ±10% per event).
+const ZOOM_WHEEL_SENSITIVITY = 0.0012
 const TIMELINE_PADDING_SECONDS = 5
 const ZOOM_COLOR = '#f59e0b' // amber — matches the canvas framing rect + zoom panel
+const MARKER_COLOR = '#06b6d4' // cyan — distinct from amber zooms, the type colors, and the playhead
+const SNAP_LINE_COLOR = '#ffffff' // the bright guide shown while a drag is actively snapped
+// Swatches offered in the marker edit popover (spec 22 R17).
+const MARKER_SWATCHES = ['#06b6d4', '#ef4444', '#22c55e', '#f59e0b', '#a855f7', '#ec4899']
 
 const formatTime = (seconds: number): string => {
   const m = Math.floor(seconds / 60)
@@ -68,6 +79,9 @@ type DragState =
   | { kind: 'zoom-resize-left'; zoomId: string; startMouseX: number; originalStartTime: number; originalHold: number }
   // Retime a single pan/scale keyframe within a zoom's hold (clamped between neighbors, [0, hold]).
   | { kind: 'zoom-move-keyframe'; zoomId: string; kfIndex: number; startMouseX: number; originalTime: number; minTime: number; maxTime: number }
+  // Drag a marker flag along the ruler to retime it (spec 22). A no-movement press is treated as a
+  // click on mouse-up (seek + open the edit popover); a real drag retimes with snapping.
+  | { kind: 'marker-move'; markerId: string; startMouseX: number; startClientY: number; originalTime: number }
 
 /** Eye / eye-off glyph for the hide toggle (spec 14 R11). */
 function EyeIcon({ off }: { off: boolean }) {
@@ -85,11 +99,18 @@ export default function Timeline({
   zooms,
   selectedZoomId,
   onSelectZoom,
+  markers,
   onCollapse,
 }: TimelineProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [pixelsPerSecond, setPixelsPerSecond] = useState(DEFAULT_PIXELS_PER_SECOND)
   const [dragState, setDragState] = useState<DragState>(null)
+  // Marker snapping (spec 22): the candidate time a live drag is currently locked onto (drives the
+  // bright snap guide line); null when the drag isn't snapped. Cleared on mouse-up.
+  const [snapLineTime, setSnapLineTime] = useState<number | null>(null)
+  // The marker whose edit popover is open (label/color/delete), with a viewport anchor. Local to the
+  // timeline — markers have no global selection state (spec 22 R17).
+  const [editingMarker, setEditingMarker] = useState<{ id: string; left: number; top: number } | null>(null)
   // Track explicitly added lane boundaries (absolute lane numbers, not offsets)
   // null = no extra lanes beyond object range
   const [addedTopLane, setAddedTopLane] = useState<number | null>(null)
@@ -111,7 +132,10 @@ export default function Timeline({
   const lanes: number[] = []
   for (let l = minLane; l <= maxLane; l++) lanes.push(l)
 
-  const viewDuration = Math.max(totalDuration + TIMELINE_PADDING_SECONDS, 10)
+  // Extend the view to reveal a marker placed past the end of all content (spec 22 R11). Markers
+  // do NOT extend totalDuration/export length — only how far the timeline scrolls.
+  const maxMarkerTime = (markers ?? []).reduce((mx, m) => Math.max(mx, m.time), 0)
+  const viewDuration = Math.max(Math.max(totalDuration, maxMarkerTime) + TIMELINE_PADDING_SECONDS, 10)
   const timelineWidth = viewDuration * pixelsPerSecond
 
   const timeToX = useCallback((time: number) => time * pixelsPerSecond, [pixelsPerSecond])
@@ -129,6 +153,25 @@ export default function Timeline({
     return xToTime(x)
   }, [xToTime])
 
+  // Build the snap-target times for a drag (spec 22): t=0, the playhead, every marker time, and
+  // every visible clip's start/end edge. Excludes the dragged item's own edges/time (so it never
+  // sticks to itself) and hidden clips (you can't see them to align to).
+  const buildSnapCandidates = useCallback(
+    (opts: { excludeObjectId?: string; excludeMarkerId?: string; includePlayhead?: boolean }) => {
+      const cands: number[] = [0]
+      if (opts.includePlayhead !== false) cands.push(globalTime)
+      for (const m of markers ?? []) {
+        if (m.id !== opts.excludeMarkerId) cands.push(m.time)
+      }
+      for (const o of objects) {
+        if (o.id === opts.excludeObjectId || o.hidden) continue
+        cands.push(o.startTime, o.startTime + o.duration)
+      }
+      return cands
+    },
+    [objects, markers, globalTime],
+  )
+
   // Time-zoom with Ctrl/Cmd + wheel (spec 16 A2). MUST be a native, non-passive listener: React's
   // onWheel is passive, so its preventDefault is ignored and the browser page-zooms instead (the
   // bug this replaces). Plain wheel falls through to the container's native horizontal + vertical
@@ -142,7 +185,10 @@ export default function Timeline({
       if (!(e.ctrlKey || e.metaKey)) return // let plain wheel scroll the lanes natively
       e.preventDefault()
       const prev = pixelsPerSecondRef.current
-      const factor = e.deltaY > 0 ? 0.9 : 1.1
+      // Zoom proportional to the actual scroll distance so trackpads (which fire many tiny deltas /
+      // pinch events) aren't unusably fast. Normalize deltaMode to px, then clamp the per-event step.
+      const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? el.clientHeight : 1
+      const factor = Math.min(1.25, Math.max(0.8, Math.exp(-e.deltaY * unit * ZOOM_WHEEL_SENSITIVITY)))
       const next = Math.min(MAX_PIXELS_PER_SECOND, Math.max(MIN_PIXELS_PER_SECOND, prev * factor))
       if (next === prev) return
       // Keep the time under the cursor fixed: remember its content-x, restore scrollLeft after the
@@ -195,11 +241,20 @@ export default function Timeline({
     const handleMouseMove = (e: MouseEvent) => {
       const dx = e.clientX - dragState.startMouseX
       const dt = dx / pixelsPerSecond
+      const alt = e.altKey // hold Alt to bypass snapping for this drag (spec 22 R14)
 
       if (dragState.kind === 'playhead') {
-        onSeek(Math.max(0, dragState.startTime + dt))
+        const raw = Math.max(0, dragState.startTime + dt)
+        const snap = snapTime(raw, buildSnapCandidates({ includePlayhead: false }), pixelsPerSecond, SNAP_THRESHOLD_PX, alt)
+        setSnapLineTime(snap.snappedTo)
+        onSeek(snap.time)
       } else if (dragState.kind === 'move') {
-        const newStart = Math.round(Math.max(0, dragState.originalStartTime + dt) * 10) / 10
+        const rawStart = Math.max(0, dragState.originalStartTime + dt)
+        const obj = objects.find((o) => o.id === dragState.objectId)
+        const snap = snapClipMove(rawStart, obj?.duration ?? 0, buildSnapCandidates({ excludeObjectId: dragState.objectId }), pixelsPerSecond, SNAP_THRESHOLD_PX, alt)
+        setSnapLineTime(snap.snappedTo)
+        // Snapped → land exactly on the target; otherwise keep the gentle 0.1s quantize.
+        const newStart = snap.snappedTo !== null ? snap.time : Math.round(rawStart * 10) / 10
         // Calculate target lane, clamped to existing lanes
         const dy = e.clientY - dragState.startMouseY
         const laneDelta = Math.round(-dy / (LANE_HEIGHT + LANE_GAP))
@@ -210,13 +265,18 @@ export default function Timeline({
           updates: { startTime: newStart, lane: targetLane },
         })
       } else if (dragState.kind === 'resize-left') {
-        const rawStart = Math.max(0, Math.min(
-          dragState.originalStartTime + dragState.originalDuration - 0.1,
-          dragState.originalStartTime + dt,
-        ))
-        const newStart = Math.round(rawStart * 10) / 10
+        const origEnd = dragState.originalStartTime + dragState.originalDuration
         // Only non-media objects reach resize-left now (media edges trim instead), so no rate clamp.
-        const newDuration = Math.round((dragState.originalStartTime + dragState.originalDuration - newStart) * 10) / 10
+        const rawStart = Math.max(0, Math.min(origEnd - 0.1, dragState.originalStartTime + dt))
+        const snap = snapTime(rawStart, buildSnapCandidates({ excludeObjectId: dragState.objectId }), pixelsPerSecond, SNAP_THRESHOLD_PX, alt)
+        setSnapLineTime(snap.snappedTo)
+        // Right edge stays fixed: derive duration exactly from the (snapped) left edge.
+        const newStart = snap.snappedTo !== null
+          ? Math.max(0, Math.min(origEnd - 0.1, snap.time))
+          : Math.round(rawStart * 10) / 10
+        const newDuration = snap.snappedTo !== null
+          ? origEnd - newStart
+          : Math.round((origEnd - newStart) * 10) / 10
         const obj = objects.find((o) => o.id === dragState.objectId)
         const clampedAnimateIn = obj ? Math.min(obj.animateIn, newDuration) : undefined
         dispatch({
@@ -226,8 +286,14 @@ export default function Timeline({
         })
       } else if (dragState.kind === 'resize-right') {
         // Only non-media objects reach resize-right now (media edges trim instead), so no rate clamp.
-        const newDuration = Math.round(Math.max(0.1, dragState.originalDuration + dt) * 10) / 10
         const obj = objects.find((o) => o.id === dragState.objectId)
+        const startT = obj?.startTime ?? 0 // left edge is fixed during a right-resize
+        const rawRight = startT + Math.max(0.1, dragState.originalDuration + dt)
+        const snap = snapTime(rawRight, buildSnapCandidates({ excludeObjectId: dragState.objectId }), pixelsPerSecond, SNAP_THRESHOLD_PX, alt)
+        setSnapLineTime(snap.snappedTo)
+        const newDuration = snap.snappedTo !== null
+          ? Math.max(0.1, snap.time - startT)
+          : Math.round(Math.max(0.1, dragState.originalDuration + dt) * 10) / 10
         const clampedAnimateIn = obj ? Math.min(obj.animateIn, newDuration) : undefined
         dispatch({
           type: 'UPDATE_OBJECT',
@@ -242,9 +308,16 @@ export default function Timeline({
         const rightEdge = dragState.originalStartTime + dragState.originalDuration
         // duration ≤ originalSourceOut/rate keeps sourceIn ≥ 0; duration ≤ rightEdge keeps startTime ≥ 0.
         const maxDur = Math.min(dragState.originalSourceOut / rate, rightEdge)
-        const newDuration = Math.round(Math.max(0.1, Math.min(maxDur, dragState.originalDuration - dt)) * 100) / 100
+        // Snap the moving LEFT edge to nearby targets ("trim to the beat", spec 22 R13).
+        const rawStart = dragState.originalStartTime + dt
+        const snap = snapTime(rawStart, buildSnapCandidates({ excludeObjectId: dragState.objectId }), pixelsPerSecond, SNAP_THRESHOLD_PX, alt)
+        setSnapLineTime(snap.snappedTo)
+        const rawDur = rightEdge - (snap.snappedTo !== null ? snap.time : rawStart)
+        const newDuration = snap.snappedTo !== null
+          ? Math.max(0.1, Math.min(maxDur, rawDur))
+          : Math.round(Math.max(0.1, Math.min(maxDur, rawDur)) * 100) / 100
         const newSourceIn = Math.max(0, dragState.originalSourceOut - rate * newDuration)
-        const newStart = Math.round((rightEdge - newDuration) * 100) / 100
+        const newStart = snap.snappedTo !== null ? rightEdge - newDuration : Math.round((rightEdge - newDuration) * 100) / 100
         const obj = objects.find((o) => o.id === dragState.objectId)
         if (obj) {
           dispatch({
@@ -264,9 +337,17 @@ export default function Timeline({
         const origSpan = dragState.originalSourceOut - dragState.originalSourceIn
         const rate = origSpan / dragState.originalDuration
         const maxDur = (dragState.assetDuration - dragState.originalSourceIn) / rate
-        const newDuration = Math.round(Math.max(0.1, Math.min(maxDur, dragState.originalDuration + dt)) * 100) / 100
-        const newSourceOut = Math.min(dragState.assetDuration, dragState.originalSourceIn + rate * newDuration)
         const obj = objects.find((o) => o.id === dragState.objectId)
+        const startT = obj?.startTime ?? 0 // startTime is fixed during a right-trim
+        // Snap the moving RIGHT edge to nearby targets ("trim to the beat", spec 22 R13).
+        const rawRight = startT + (dragState.originalDuration + dt)
+        const snap = snapTime(rawRight, buildSnapCandidates({ excludeObjectId: dragState.objectId }), pixelsPerSecond, SNAP_THRESHOLD_PX, alt)
+        setSnapLineTime(snap.snappedTo)
+        const rawDur = (snap.snappedTo !== null ? snap.time : rawRight) - startT
+        const newDuration = snap.snappedTo !== null
+          ? Math.max(0.1, Math.min(maxDur, rawDur))
+          : Math.round(Math.max(0.1, Math.min(maxDur, rawDur)) * 100) / 100
+        const newSourceOut = Math.min(dragState.assetDuration, dragState.originalSourceIn + rate * newDuration)
         if (obj) {
           dispatch({
             type: 'UPDATE_OBJECT_TRANSIENT',
@@ -279,6 +360,8 @@ export default function Timeline({
           })
         }
       } else if (dragState.kind === 'move-keyframe') {
+        // Below the click threshold, dispatch nothing — a pure click stays a click (seeks on mouse-up).
+        if (Math.abs(e.clientX - dragState.startMouseX) < 3) return
         // Retime a single keyframe; clamped between its neighbors so the order never flips.
         const raw = dragState.originalTime + dt
         const t = Math.round(Math.max(dragState.minTime, Math.min(dragState.maxTime, raw)) * 100) / 100
@@ -291,7 +374,10 @@ export default function Timeline({
           })
         }
       } else if (dragState.kind === 'zoom-move') {
-        const newStart = Math.round(Math.max(0, dragState.originalStartTime + dt) * 10) / 10
+        const raw = Math.max(0, dragState.originalStartTime + dt)
+        const snap = snapTime(raw, buildSnapCandidates({}), pixelsPerSecond, SNAP_THRESHOLD_PX, alt)
+        setSnapLineTime(snap.snappedTo)
+        const newStart = snap.snappedTo !== null ? snap.time : Math.round(raw * 10) / 10
         dispatch({ type: 'UPDATE_ZOOM_TRANSIENT', zoomId: dragState.zoomId, updates: { startTime: newStart } })
       } else if (dragState.kind === 'zoom-resize-right') {
         // Grow/shrink the hold; start + transitions stay put.
@@ -305,6 +391,8 @@ export default function Timeline({
         const newHold = Math.round((dragState.originalHold - clampedDt) * 10) / 10
         dispatch({ type: 'UPDATE_ZOOM_TRANSIENT', zoomId: dragState.zoomId, updates: { startTime: newStart, hold: newHold } })
       } else if (dragState.kind === 'zoom-move-keyframe') {
+        // Below the click threshold, dispatch nothing — a pure click stays a click (seeks on mouse-up).
+        if (Math.abs(e.clientX - dragState.startMouseX) < 3) return
         // Retime one pan/scale keyframe; clamped between neighbors so the order never flips.
         const raw = dragState.originalTime + dt
         const t = Math.round(Math.max(dragState.minTime, Math.min(dragState.maxTime, raw)) * 100) / 100
@@ -316,18 +404,52 @@ export default function Timeline({
             updates: { keyframes: zoom.keyframes.map((k, j) => (j === dragState.kfIndex ? { ...k, time: t } : k)) },
           })
         }
+      } else if (dragState.kind === 'marker-move') {
+        // Below the click threshold, dispatch nothing — a pure click stays a click (no stray
+        // transient to commit). Past it, retime with snapping (same targets clips use, minus self).
+        if (Math.abs(e.clientX - dragState.startMouseX) < 3) return
+        const raw = Math.max(0, dragState.originalTime + dt)
+        const snap = snapTime(raw, buildSnapCandidates({ excludeMarkerId: dragState.markerId }), pixelsPerSecond, SNAP_THRESHOLD_PX, alt)
+        setSnapLineTime(snap.snappedTo)
+        const newTime = snap.snappedTo !== null ? snap.time : Math.round(raw * 10) / 10
+        dispatch({ type: 'UPDATE_MARKER_TRANSIENT', markerId: dragState.markerId, updates: { time: newTime } })
       }
     }
 
-    const handleMouseUp = () => {
-      if (
-        dragState.kind === 'move' || dragState.kind === 'move-keyframe' ||
+    const handleMouseUp = (e: MouseEvent) => {
+      if (dragState.kind === 'marker-move') {
+        // Commit any retime (safe no-op for a pure click, where no transient ever fired). A press
+        // with no real movement is a click: seek to the marker + open its edit popover (R9/R17).
+        dispatch({ type: 'COMMIT_TRANSIENT' })
+        if (Math.abs(e.clientX - dragState.startMouseX) < 3) {
+          const m = (markers ?? []).find((mk) => mk.id === dragState.markerId)
+          if (m) {
+            onSeek(m.time)
+            setEditingMarker({ id: m.id, left: e.clientX, top: dragState.startClientY + 12 })
+          }
+        }
+      } else if (dragState.kind === 'move-keyframe') {
+        dispatch({ type: 'COMMIT_TRANSIENT' })
+        // A press with no real movement is a click: jump the playhead to the keyframe.
+        if (Math.abs(e.clientX - dragState.startMouseX) < 3) {
+          const obj = objects.find((o) => o.id === dragState.objectId)
+          if (obj) onSeek(obj.startTime + dragState.originalTime)
+        }
+      } else if (dragState.kind === 'zoom-move-keyframe') {
+        dispatch({ type: 'COMMIT_TRANSIENT' })
+        // Click (no real movement): jump the playhead to the keyframe (hold-relative → absolute).
+        if (Math.abs(e.clientX - dragState.startMouseX) < 3) {
+          const zoom = (zooms ?? []).find((z) => z.id === dragState.zoomId)
+          if (zoom) onSeek(zoom.startTime + zoom.transitionIn + dragState.originalTime)
+        }
+      } else if (
+        dragState.kind === 'move' ||
         dragState.kind === 'trim-left' || dragState.kind === 'trim-right' ||
-        dragState.kind === 'zoom-move' || dragState.kind === 'zoom-resize-right' || dragState.kind === 'zoom-resize-left' ||
-        dragState.kind === 'zoom-move-keyframe'
+        dragState.kind === 'zoom-move' || dragState.kind === 'zoom-resize-right' || dragState.kind === 'zoom-resize-left'
       ) {
         dispatch({ type: 'COMMIT_TRANSIENT' })
       }
+      setSnapLineTime(null)
       setDragState(null)
     }
 
@@ -337,7 +459,7 @@ export default function Timeline({
       window.removeEventListener('mousemove', handleMouseMove)
       window.removeEventListener('mouseup', handleMouseUp)
     }
-  }, [dragState, pixelsPerSecond, dispatch, onSeek, minLane, maxLane, objects, zooms])
+  }, [dragState, pixelsPerSecond, dispatch, onSeek, minLane, maxLane, objects, zooms, markers, buildSnapCandidates])
 
   // Render ruler ticks
   const ticks: { time: number; label: string; major: boolean }[] = []
@@ -465,6 +587,37 @@ export default function Timeline({
                   )}
                 </div>
               ))}
+
+              {/* Marker flags (spec 22) — live in the ruler so they stay pinned during vertical lane
+                  scroll. Left edge sits exactly on the marker time (the guide line renders separately
+                  down through the lanes). Drag to retime; a click (no move) seeks + opens the popover. */}
+              {(markers ?? []).map((m) => {
+                const color = m.color ?? MARKER_COLOR
+                const isActive = dragState?.kind === 'marker-move' && dragState.markerId === m.id
+                return (
+                  <div
+                    key={m.id}
+                    className="absolute top-0 z-10 cursor-grab active:cursor-grabbing"
+                    style={{ left: timeToX(m.time), height: RULER_HEIGHT }}
+                    title={m.label || 'Marker — click to edit, drag to move'}
+                    onMouseDown={(e) => {
+                      e.stopPropagation()
+                      setDragState({ kind: 'marker-move', markerId: m.id, startMouseX: e.clientX, startClientY: e.clientY, originalTime: m.time })
+                    }}
+                  >
+                    <div
+                      className="absolute top-1 left-0 flex items-center h-3.5 rounded-r-sm rounded-bl-sm px-1"
+                      style={{ background: color, minWidth: 8, boxShadow: isActive ? '0 0 0 2px #fff' : '0 1px 2px rgba(0,0,0,0.4)' }}
+                    >
+                      {m.label && (
+                        <span className="text-[9px] font-semibold text-black/90 leading-none whitespace-nowrap max-w-[110px] truncate">
+                          {m.label}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )
+              })}
             </div>
 
             {/* Camera track (pinned top, spec 13): zoom envelope bars — not an object lane. Opaque
@@ -564,6 +717,28 @@ export default function Timeline({
                     >
                       <EyeIcon off={!!zoom.hidden} />
                     </button>
+
+                    {/* Lead-in ramps (spec 21): the moving window [time - leadIn, time] before each
+                        diamond, so a hold-then-move keyframe reads distinct from a fill-the-gap one. */}
+                    {(zoom.keyframes ?? []).map((k, i) => {
+                      const zkfs = zoom.keyframes!
+                      const prev = i > 0 ? zkfs[i - 1].time : 0
+                      const gap = k.time - prev
+                      const lead = k.leadIn == null ? gap : Math.min(k.leadIn, gap)
+                      if (lead <= 0.001) return null
+                      return (
+                        <div
+                          key={`zlead-${i}`}
+                          className="absolute top-1/2 -translate-y-1/2 h-1.5 z-20 pointer-events-none rounded-sm"
+                          style={{
+                            left: timeToX(zoom.transitionIn + (k.time - lead)),
+                            width: Math.max(timeToX(lead), 1),
+                            background: `linear-gradient(90deg, transparent, ${keyframeColor(i)})`,
+                            opacity: 0.5,
+                          }}
+                        />
+                      )
+                    })}
 
                     {/* Pan/scale keyframe diamonds over the hold — drag to retime (clamped to
                         neighbors and [0, hold]). Positioned from the bar's left edge by
@@ -755,33 +930,38 @@ export default function Timeline({
                         })
                       }}
                     >
-                      {/* Enter/exit transition ramps (behind the label) */}
+                      {/* Enter/exit transition ramps (behind the label) — bright so they read clearly. */}
                       {obj.enter && obj.enter.kind !== 'none' && (
                         <div
                           className="absolute top-0 left-0 h-full pointer-events-none"
-                          style={{ width: Math.min(timeToX(obj.enter.duration), width), background: 'linear-gradient(90deg, rgba(255,255,255,0.35), transparent)' }}
+                          style={{ width: Math.min(timeToX(obj.enter.duration), width), background: 'linear-gradient(90deg, rgba(255,255,255,0.85), rgba(255,255,255,0.15))' }}
                         />
                       )}
                       {obj.exit && obj.exit.kind !== 'none' && (
                         <div
                           className="absolute top-0 right-0 h-full pointer-events-none"
-                          style={{ width: Math.min(timeToX(obj.exit.duration), width), background: 'linear-gradient(270deg, rgba(255,255,255,0.35), transparent)' }}
+                          style={{ width: Math.min(timeToX(obj.exit.duration), width), background: 'linear-gradient(270deg, rgba(255,255,255,0.85), rgba(255,255,255,0.15))' }}
                         />
                       )}
-                      {/* Waveform background for audio clips */}
-                      {obj.type === 'audio' && (obj.data as AudioData).waveform && (
-                        <div className="absolute inset-0 flex items-end pointer-events-none opacity-30">
-                          {(obj.data as AudioData).waveform!.map((peak, wi) => (
-                            <div
-                              key={wi}
-                              className="flex-1 bg-white"
-                              style={{ height: `${peak * 100}%`, minWidth: 0 }}
-                            />
-                          ))}
-                        </div>
-                      )}
+                      {/* Waveform background for audio clips + video (audio track). */}
+                      {(() => {
+                        const wf = obj.type === 'audio' || obj.type === 'video'
+                          ? (obj.data as AudioData | VideoData).waveform
+                          : undefined
+                        return wf ? (
+                          <div className="absolute inset-0 flex items-end pointer-events-none opacity-30">
+                            {wf.map((peak, wi) => (
+                              <div
+                                key={wi}
+                                className="flex-1 bg-white"
+                                style={{ height: `${peak * 100}%`, minWidth: 0 }}
+                              />
+                            ))}
+                          </div>
+                        ) : null
+                      })()}
 
-                      <span className="relative text-[10px] text-white px-1 truncate leading-[32px] pointer-events-none">
+                      <span className="relative text-[10px] text-white px-1 truncate leading-10 pointer-events-none">
                         <span className="font-bold">{obj.name}</span>
                         {' '}
                         <span className="opacity-70">[{formatTime(obj.startTime)} - {formatTime(obj.startTime + obj.duration)}]</span>
@@ -819,6 +999,28 @@ export default function Timeline({
                     >
                       <EyeIcon off={!!obj.hidden} />
                     </button>
+
+                    {/* Lead-in ramps (spec 21): the moving window before each diamond, so a
+                        hold-then-move keyframe reads distinct from a fill-the-gap one. */}
+                    {(obj.keyframes ?? []).map((k, i) => {
+                      const okfs = obj.keyframes!
+                      const prev = i > 0 ? okfs[i - 1].time : 0
+                      const gap = k.time - prev
+                      const lead = k.leadIn == null ? gap : Math.min(k.leadIn, gap)
+                      if (lead <= 0.001) return null
+                      return (
+                        <div
+                          key={`lead-${i}`}
+                          className="absolute top-1/2 -translate-y-1/2 h-2 z-10 pointer-events-none rounded-sm"
+                          style={{
+                            left: timeToX(k.time - lead),
+                            width: Math.max(timeToX(lead), 1),
+                            background: `linear-gradient(90deg, transparent, ${keyframeColor(i)})`,
+                            opacity: 0.5,
+                          }}
+                        />
+                      )
+                    })}
 
                     {/* Keyframe markers (diamonds on top of the bar), colored to match the
                         panel pips. Drag one horizontally to retime that keyframe. */}
@@ -904,6 +1106,26 @@ export default function Timeline({
             {/* Blank lane spacer for "add below" CTA alignment */}
             <div style={{ height: LANE_HEIGHT }} />
 
+            {/* Marker guide lines (spec 22) — full-height, through the lanes. zIndex 55 keeps them
+                above the lane bars (≤ 50) but behind the opaque ruler/Camera track (60), so only the
+                flag shows in the ruler band and the line runs down through the tracks. */}
+            {(markers ?? []).map((m) => (
+              <div
+                key={m.id}
+                className="absolute top-0 w-px pointer-events-none"
+                style={{ left: timeToX(m.time), height: '100%', background: m.color ?? MARKER_COLOR, opacity: 0.45, zIndex: 55 }}
+              />
+            ))}
+
+            {/* Active snap guide (spec 22 R15) — the bright line a live drag is currently locked onto.
+                Drawn above the playhead so the lock is unmistakable. */}
+            {snapLineTime !== null && (
+              <div
+                className="absolute top-0 w-px pointer-events-none"
+                style={{ left: timeToX(snapLineTime), height: '100%', background: SNAP_LINE_COLOR, opacity: 0.9, zIndex: 66 }}
+              />
+            )}
+
             {/* Playhead — spans the full content height; drawn over the pinned ruler/Camera track
                 (zIndex 65 > their 60) but under the frozen lane gutter (z-[70]) so it hides under it. */}
             <div
@@ -917,6 +1139,99 @@ export default function Timeline({
           </div>
         </div>
       </div>
+
+      {/* Marker edit popover (spec 22 R17) — opened by clicking a flag; label / color / delete. */}
+      {editingMarker && (() => {
+        const m = (markers ?? []).find((mk) => mk.id === editingMarker.id)
+        return m ? (
+          <MarkerPopover
+            marker={m}
+            left={editingMarker.left}
+            top={editingMarker.top}
+            dispatch={dispatch}
+            onClose={() => setEditingMarker(null)}
+          />
+        ) : null
+      })()}
     </div>
+  )
+}
+
+/**
+ * Lightweight marker editor (spec 22 R17) — a viewport-clamped popover portalled to document.body,
+ * mirroring Popover.tsx's outside-click / Escape dismissal. Markers have no global selection state,
+ * so this owns the whole edit surface: label, color swatches, delete. Escape's stopPropagation keeps
+ * App's window-level handler from also firing (which would deselect the current object/zoom).
+ */
+function MarkerPopover({
+  marker,
+  left,
+  top,
+  dispatch,
+  onClose,
+}: {
+  marker: Marker
+  left: number
+  top: number
+  dispatch: React.Dispatch<ProjectAction>
+  onClose: () => void
+}) {
+  const panelRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => {
+      if (!panelRef.current?.contains(e.target as Node)) onClose()
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { e.stopPropagation(); onClose() }
+    }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [onClose])
+
+  const PW = 220
+  const clampedLeft = Math.max(8, Math.min(left - PW / 2, window.innerWidth - PW - 8))
+  const clampedTop = Math.max(8, Math.min(top, window.innerHeight - 170))
+
+  return createPortal(
+    <div
+      ref={panelRef}
+      className="fixed z-[90] rounded-lg border border-border bg-surface shadow-xl p-3"
+      style={{ left: clampedLeft, top: clampedTop, width: PW }}
+    >
+      <div className="text-[11px] font-semibold text-subtle mb-1.5">Marker</div>
+      <input
+        autoFocus
+        type="text"
+        value={marker.label ?? ''}
+        placeholder="Label (optional)"
+        onChange={(e) => dispatch({ type: 'UPDATE_MARKER', markerId: marker.id, updates: { label: e.target.value || undefined } })}
+        className="w-full bg-surface-muted border border-border rounded px-2 py-1 text-xs text-fg outline-none focus:border-accent mb-2"
+      />
+      <div className="flex items-center gap-1.5 mb-2.5">
+        {MARKER_SWATCHES.map((c) => {
+          const active = (marker.color ?? MARKER_COLOR) === c
+          return (
+            <button
+              key={c}
+              onClick={() => dispatch({ type: 'UPDATE_MARKER', markerId: marker.id, updates: { color: c } })}
+              className="w-5 h-5 rounded-full cursor-pointer transition-transform hover:scale-110"
+              style={{ background: c, outline: active ? '2px solid var(--fg)' : 'none', outlineOffset: 1 }}
+              title={c}
+            />
+          )
+        })}
+      </div>
+      <button
+        onClick={() => { dispatch({ type: 'REMOVE_MARKER', markerId: marker.id }); onClose() }}
+        className="w-full flex items-center justify-center gap-1 px-2 py-1 text-xs text-danger hover:bg-danger-soft rounded transition-colors cursor-pointer"
+      >
+        <IconTrash size={13} stroke={2} /> Delete marker
+      </button>
+    </div>,
+    document.body,
   )
 }

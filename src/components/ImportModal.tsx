@@ -226,6 +226,14 @@ export default function ImportModal({
         timeOffset += duration;
       } else if (item.type === "video") {
         const duration = item.duration ?? 5;
+        // Decode the video's audio track for a timeline waveform (Chromium decodes audio from mp4/
+        // webm containers). Silent videos / unsupported audio simply fall through with no waveform.
+        let waveform: number[] | undefined;
+        try {
+          waveform = await generateWaveform(item.file);
+        } catch {
+          // no audio track or decode failed — continue without a waveform
+        }
         newObjects.push(
           createTimelineObject(
             "video",
@@ -233,6 +241,7 @@ export default function ImportModal({
               assetId: meta.id,
               volume: 1,
               originalDuration: duration,
+              waveform,
               sourceIn: 0,
               sourceOut: duration,
             },

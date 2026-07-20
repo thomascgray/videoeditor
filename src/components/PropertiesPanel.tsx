@@ -18,7 +18,7 @@ import { srcIn, srcOut, sourceSpan, RATE_MIN, RATE_MAX } from '../lib/mediaTimin
 import { rememberObjectStyle, rememberObjectData } from '../lib/objectDefaults'
 import {
   Field, NumberInput, TransitionFields, TypeOnBar, EffectFields,
-  KeyframeTrack, KeyframeStatus, ZoomKeyframeTrack, EASINGS, EASING_LABELS, SELECT_CLS,
+  KeyframeTrack, KeyframeStatus, ZoomKeyframeTrack, MotionPicker, LeadInField, SELECT_CLS,
 } from './propertyControls'
 
 type PropertiesPanelProps = {
@@ -94,6 +94,12 @@ export default function PropertiesPanel({ object: obj, zoom, dispatch, globalTim
 
   const setKeyframeEasing = (idx: number, easing: EasingKind) =>
     update({ keyframes: kfs.map((k, j) => (j === idx ? { ...k, easing } : k)) })
+  const applyEasingToAllKeyframes = (easing: EasingKind) =>
+    update({ keyframes: kfs.map((k) => ({ ...k, easing })) })
+  const setKeyframeLeadIn = (idx: number, leadIn: number) =>
+    update({ keyframes: kfs.map((k, j) => (j === idx ? { ...k, leadIn } : k)) })
+  // Gap from the previous waypoint (base pose at 0 for the first keyframe) — the lead-in max.
+  const kfGap = (idx: number) => kfs[idx].time - (idx > 0 ? kfs[idx - 1].time : 0)
   const deleteKeyframe = (idx: number) => {
     const next = kfs.filter((_, j) => j !== idx)
     update({ keyframes: next.length ? next : undefined })
@@ -308,14 +314,11 @@ export default function PropertiesPanel({ object: obj, zoom, dispatch, globalTim
             <div className="mt-2 space-y-2">
               <div>
                 <label className="text-muted text-xs block mb-1">Motion</label>
-                <select
+                <MotionPicker
                   value={kfs[activeIdx].easing}
-                  onChange={(e) => setKeyframeEasing(activeIdx, e.target.value as EasingKind)}
-                  className="w-full bg-surface-muted text-fg text-[11px] px-1 py-1 rounded border outline-none cursor-pointer"
-                  style={{ borderColor: activeColor ?? 'var(--border)' }}
-                >
-                  {EASINGS.map((k) => <option key={k} value={k}>{EASING_LABELS[k]}</option>)}
-                </select>
+                  onChange={(k) => setKeyframeEasing(activeIdx, k)}
+                  color={activeColor ?? undefined}
+                />
                 {/* Clarify: the easing shapes the segment ARRIVING at this keyframe (req 7) */}
                 <p className="text-[10px] text-subtle mt-1">
                   Plays as the object animates{' '}
@@ -324,6 +327,20 @@ export default function PropertiesPanel({ object: obj, zoom, dispatch, globalTim
                   </span>.
                 </p>
               </div>
+              {/* Lead-in: how long the arriving move takes (spec 21). The rest of the gap holds. */}
+              <LeadInField
+                value={kfs[activeIdx].leadIn}
+                gap={kfGap(activeIdx)}
+                color={activeColor ?? undefined}
+                onChange={(v) => setKeyframeLeadIn(activeIdx, v)}
+              />
+              {kfs.length > 1 && (
+                <button
+                  onClick={() => applyEasingToAllKeyframes(kfs[activeIdx].easing)}
+                  title="Give every keyframe on this object the same motion curve as this one"
+                  className="w-full px-2 py-1 text-[11px] text-muted bg-surface-muted hover:bg-surface-hover rounded cursor-pointer transition-colors"
+                >Apply this motion to all keyframes</button>
+              )}
               <button
                 onClick={() => deleteKeyframe(activeIdx)}
                 className="w-full px-2 py-1 text-[11px] text-danger bg-danger-soft hover:bg-danger/20 rounded cursor-pointer transition-colors"
@@ -624,6 +641,12 @@ function ZoomEditor({
   const addZoomKeyframe = () => update({ keyframes: addZoomKeyframeAt(zoom, holdTime) })
   const setZoomKeyframeEasing = (idx: number, easing: EasingKind) =>
     update({ keyframes: kfs.map((k, j) => (j === idx ? { ...k, easing } : k)) })
+  const applyZoomEasingToAllKeyframes = (easing: EasingKind) =>
+    update({ keyframes: kfs.map((k) => ({ ...k, easing })) })
+  const setZoomKeyframeLeadIn = (idx: number, leadIn: number) =>
+    update({ keyframes: kfs.map((k, j) => (j === idx ? { ...k, leadIn } : k)) })
+  // Gap from the previous waypoint (home pose at hold-relative 0 for the first keyframe).
+  const zkfGap = (idx: number) => kfs[idx].time - (idx > 0 ? kfs[idx - 1].time : 0)
   const deleteZoomKeyframe = (idx: number) => {
     const next = kfs.filter((_, j) => j !== idx)
     update({ keyframes: next.length ? next : undefined })
@@ -678,13 +701,7 @@ function ZoomEditor({
         </Field>
         <div>
           <label className="text-muted text-xs block mb-1">Motion</label>
-          <select
-            value={zoom.easing}
-            onChange={(e) => update({ easing: e.target.value as EasingKind })}
-            className="w-full bg-surface-muted text-fg text-[11px] px-1 py-1 rounded border border-border focus:border-accent outline-none cursor-pointer"
-          >
-            {EASINGS.map((k) => <option key={k} value={k}>{EASING_LABELS[k]}</option>)}
-          </select>
+          <MotionPicker value={zoom.easing} onChange={(k) => update({ easing: k })} />
           <p className="text-[10px] text-subtle mt-1">Shapes both the push-in and the pull-out ramps.</p>
         </div>
         <div className="flex items-center justify-between text-[10px] text-subtle tabular-nums pt-1">
@@ -736,16 +753,27 @@ function ZoomEditor({
           <div className="mt-2 space-y-2">
             <div>
               <label className="text-muted text-xs block mb-1">Motion</label>
-              <select
+              <MotionPicker
                 value={kfs[activeIdx].easing}
-                onChange={(e) => setZoomKeyframeEasing(activeIdx, e.target.value as EasingKind)}
-                className="w-full bg-surface-muted text-fg text-[11px] px-1 py-1 rounded border outline-none cursor-pointer"
-                style={{ borderColor: activeColor ?? 'var(--border)' }}
-              >
-                {EASINGS.map((k) => <option key={k} value={k}>{EASING_LABELS[k]}</option>)}
-              </select>
+                onChange={(k) => setZoomKeyframeEasing(activeIdx, k)}
+                color={activeColor ?? undefined}
+              />
               <p className="text-[10px] text-subtle mt-1">Shapes the pan / scale arriving at this keyframe.</p>
             </div>
+            {/* Lead-in: how long the pan/scale into this keyframe takes; the rest of the gap holds. */}
+            <LeadInField
+              value={kfs[activeIdx].leadIn}
+              gap={zkfGap(activeIdx)}
+              color={activeColor ?? undefined}
+              onChange={(v) => setZoomKeyframeLeadIn(activeIdx, v)}
+            />
+            {kfs.length > 1 && (
+              <button
+                onClick={() => applyZoomEasingToAllKeyframes(kfs[activeIdx].easing)}
+                title="Give every keyframe on this zoom the same motion curve as this one"
+                className="w-full px-2 py-1 text-[11px] text-muted bg-surface-muted hover:bg-surface-hover rounded cursor-pointer transition-colors"
+              >Apply this motion to all keyframes</button>
+            )}
             <button
               onClick={() => deleteZoomKeyframe(activeIdx)}
               className="w-full px-2 py-1 text-[11px] text-danger bg-danger-soft hover:bg-danger/20 rounded cursor-pointer transition-colors"

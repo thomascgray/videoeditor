@@ -24,6 +24,9 @@ import { ease, clamp01 } from './easing'
 export const ANIMATABLE: AnimatableProperty[] = ['x', 'y', 'width', 'height', 'rotation', 'opacity']
 export const DEFAULT_EASING: EasingKind = 'easeInOutCubic'
 export const KF_EPS = 0.03 // seconds — "on this keyframe" tolerance (~1 frame @30fps)
+// Default lead-in seeded on newly-created keyframes (spec 21): a short hold-then-move so the
+// out-of-box feel is snappy (screen-recorder style). Clamped to the gap to the previous waypoint.
+export const DEFAULT_LEAD_IN = 0.8
 
 /**
  * Per-keyframe accent colors (by index). The 1st keyframe is red, 2nd blue, 3rd green, …
@@ -69,11 +72,11 @@ export function poseAt(obj: TimelineObject, t: number): KeyframePose {
   if (!kfs || kfs.length === 0) return base
 
   // Waypoints: the base pose at t=0, then each keyframe. If a keyframe already sits at ~0 it
-  // replaces the base as the start.
-  const wps: { time: number; pose: KeyframePose; easing: EasingKind }[] =
+  // replaces the base as the start. The synthetic base is only ever a start (its leadIn is unread).
+  const wps: { time: number; pose: KeyframePose; easing: EasingKind; leadIn?: number }[] =
     kfs[0].time <= KF_EPS
-      ? kfs.map((k) => ({ time: k.time, pose: k.pose, easing: k.easing }))
-      : [{ time: 0, pose: base, easing: 'linear' as EasingKind }, ...kfs.map((k) => ({ time: k.time, pose: k.pose, easing: k.easing }))]
+      ? kfs.map((k) => ({ time: k.time, pose: k.pose, easing: k.easing, leadIn: k.leadIn }))
+      : [{ time: 0, pose: base, easing: 'linear' as EasingKind }, ...kfs.map((k) => ({ time: k.time, pose: k.pose, easing: k.easing, leadIn: k.leadIn }))]
 
   if (t <= wps[0].time) return wps[0].pose
   const last = wps[wps.length - 1]
@@ -82,8 +85,12 @@ export function poseAt(obj: TimelineObject, t: number): KeyframePose {
     const a = wps[i]
     const b = wps[i + 1]
     if (t >= a.time && t <= b.time) {
-      const span = b.time - a.time
-      const u = span > 0 ? (t - a.time) / span : 0
+      // Lead-in (spec 21): the move into b occupies only [animStart, b.time]; before that, hold a.
+      // leadIn == null ⇒ animStart = a.time ⇒ fills the whole gap (bit-identical to legacy).
+      const animStart = b.leadIn == null ? a.time : Math.max(a.time, b.time - b.leadIn)
+      if (t < animStart) return a.pose
+      const span = b.time - animStart
+      const u = span > 1e-9 ? (t - animStart) / span : 1 // span≈0 (leadIn≈0) ⇒ snap to b at b.time
       return lerpPose(a.pose, b.pose, ease(b.easing, u)) // easing of the arriving keyframe
     }
   }
@@ -117,7 +124,7 @@ export function resolvePose(obj: TimelineObject, globalTime: number): TimelineOb
 // --- Enter / exit transitions (independent of keyframes) ---
 
 export function defaultTransitionEasing(kind: Transition['kind'], phase: 'in' | 'out'): EasingKind {
-  if (kind === 'fade') return phase === 'in' ? 'easeOutQuad' : 'easeInQuad'
+  if (kind === 'fade') return phase === 'in' ? 'easeOutCubic' : 'easeInCubic'
   return phase === 'in' ? 'easeOutBack' : 'easeInCubic' // slide / pop
 }
 
@@ -194,9 +201,10 @@ export function editPose(obj: TimelineObject, overrides: Partial<Record<Animatab
     }
     // Keyframed and past the start → make the edit concrete by inserting a keyframe here.
     if (t > KF_EPS) {
+      const time = Math.max(0, t)
       const pose = { ...poseAt(obj, t) }
       for (const p of Object.keys(overrides) as AnimatableProperty[]) pose[p] = overrides[p]!
-      const next = [...kfs, { time: Math.max(0, t), pose, easing: DEFAULT_EASING }]
+      const next = [...kfs, { time, pose, easing: seedEasing(kfs, time), leadIn: seedLeadIn(kfs, time) }]
       next.sort((a, b) => a.time - b.time)
       return { keyframes: next }
     }
@@ -211,14 +219,39 @@ export function editPose(obj: TimelineObject, overrides: Partial<Record<Animatab
   return updates
 }
 
+/**
+ * Default lead-in for a keyframe created at `time`, clamped to the gap to the nearest EARLIER
+ * waypoint (spec 21 R10). `existing` is the keyframe list before insertion.
+ */
+export function seedLeadIn(existing: { time: number }[], time: number): number {
+  let prev = 0
+  for (const k of existing) if (k.time < time - KF_EPS && k.time > prev) prev = k.time
+  return Math.min(DEFAULT_LEAD_IN, Math.max(0, time - prev))
+}
+
+/**
+ * Easing a newly-created keyframe should adopt: the last motion chosen for this object (the nearest
+ * earlier keyframe, else the nearest later one), so new keyframes continue the object's feel instead
+ * of snapping back to the default. Falls back to DEFAULT_EASING when there are no keyframes yet.
+ */
+export function seedEasing(existing: { time: number; easing: EasingKind }[], time: number): EasingKind {
+  let prev: { time: number; easing: EasingKind } | null = null
+  let next: { time: number; easing: EasingKind } | null = null
+  for (const k of existing) {
+    if (k.time <= time + KF_EPS) { if (!prev || k.time > prev.time) prev = k }
+    else if (!next || k.time < next.time) next = k
+  }
+  return (prev ?? next)?.easing ?? DEFAULT_EASING
+}
+
 /** Insert a keyframe at clip-relative `t` capturing the current rendered pose (the "+ Keyframe" button). */
 export function addKeyframeAt(obj: TimelineObject, t: number): Keyframe[] {
   const time = Math.max(0, t)
   const pose = poseAt(obj, time)
   const kfs = obj.keyframes ? [...obj.keyframes] : []
   const idx = kfs.findIndex((k) => Math.abs(k.time - time) < KF_EPS)
-  if (idx >= 0) kfs[idx] = { ...kfs[idx], pose }
-  else kfs.push({ time, pose, easing: DEFAULT_EASING })
+  if (idx >= 0) kfs[idx] = { ...kfs[idx], pose } // update in place → leave leadIn/easing untouched
+  else kfs.push({ time, pose, easing: seedEasing(kfs, time), leadIn: seedLeadIn(kfs, time) })
   kfs.sort((a, b) => a.time - b.time)
   return kfs
 }

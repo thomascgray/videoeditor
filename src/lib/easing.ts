@@ -41,10 +41,8 @@ const springEase: (u: number) => number = (() => {
  */
 export function ease(kind: EasingKind, u: number): number {
   switch (kind) {
+    case 'instant':        return u >= 1 ? 1 : 0 // step / hard-cut: hold, then snap at arrival
     case 'linear':         return u
-    case 'easeInQuad':     return u * u
-    case 'easeOutQuad':    return 1 - (1 - u) * (1 - u)
-    case 'easeInOutQuad':  return u < 0.5 ? 2 * u * u : 1 - ((-2 * u + 2) ** 2) / 2
     case 'easeInCubic':    return u * u * u
     case 'easeOutCubic':   return 1 - (1 - u) ** 3
     case 'easeInOutCubic': return u < 0.5 ? 4 * u * u * u : 1 - ((-2 * u + 2) ** 3) / 2

@@ -52,8 +52,8 @@ export type ObjectStyle = {
 // === Animation / Keyframes ===
 
 export type EasingKind =
+  | 'instant'                                          // step / hard-cut (spec 21)
   | 'linear'
-  | 'easeInQuad'  | 'easeOutQuad'  | 'easeInOutQuad'
   | 'easeInCubic' | 'easeOutCubic' | 'easeInOutCubic'
   | 'easeOutBack'
   | 'spring'
@@ -68,6 +68,8 @@ export type Keyframe = {
   time: number         // clip-relative seconds (relative to startTime) when this pose is reached
   pose: KeyframePose   // full snapshot of the object's pose at this keyframe
   easing: EasingKind   // curve for the segment ARRIVING at this keyframe (from the previous one)
+  leadIn?: number      // spec 21: seconds the arriving move takes, ending at `time`. Holds the
+                       // previous pose before (time - leadIn). Undefined = fill the whole gap (legacy).
 }
 
 // === Enter / Exit transitions ===
@@ -147,6 +149,7 @@ export type VideoData = {
   volume: number            // 0–1
   muted?: boolean           // when true, the video's audio track is silenced (preview + export); video still shows
   originalDuration: number  // seconds — the source file's actual duration
+  waveform?: number[]       // ~200 peak values of the video's audio track, for the timeline bar
   sourceIn?: number         // trim: source seconds where playback begins; default 0 (spec 14)
   sourceOut?: number        // trim: source seconds where playback ends; default originalDuration
 }
@@ -168,6 +171,7 @@ export type CameraKeyframe = {
   time: number         // seconds relative to hold start; when this pose is reached
   pose: CameraState    // { x, y, scale }
   easing: EasingKind   // curve for the segment ARRIVING at this keyframe (from the previous one)
+  leadIn?: number      // spec 21: seconds the arriving move takes, ending at `time` (as Keyframe.leadIn)
 }
 
 // One authored "zoom" — a punch-in envelope. resolveCamera compiles a list of these
@@ -191,6 +195,19 @@ export type CameraZoom = {
 // back to full frame (via A's transitionOut) before B begins.
 
 export const IDENTITY_CAMERA: CameraState = { x: 0.5, y: 0.5, scale: 1 }
+
+// === Markers (spec 22) ===
+
+// A user-placed timeline marker ("bookmark"). NOT a TimelineObject — a lightweight, project-level
+// reference point, mirroring how CameraZoom is a non-object entity. Authoring aid only: never
+// rendered on the canvas or in the export (renderFrame has no knowledge of it). A single
+// global-seconds scalar (no pose/lane/data). Clips snap to marker times (see lib/snapping.ts).
+export type Marker = {
+  id: string
+  time: number      // global seconds
+  label?: string    // optional user label ("Beat 1", "Chorus"); default unlabeled
+  color?: string    // optional accent hex; default MARKER_COLOR in Timeline
+}
 
 // === Assets ===
 
@@ -216,6 +233,7 @@ export type Project = {
   objects: TimelineObject[]
   assets: AssetMeta[]
   zooms?: CameraZoom[]      // camera punch-ins (spec 13); optional/additive for back-compat
+  markers?: Marker[]        // timeline markers (spec 22); optional/additive for back-compat
 }
 
 // === Interaction Modes ===
@@ -241,6 +259,11 @@ export type ProjectAction =
   | { type: 'UPDATE_ZOOM'; zoomId: string; updates: Partial<Omit<CameraZoom, 'id'>> }
   | { type: 'UPDATE_ZOOM_TRANSIENT'; zoomId: string; updates: Partial<Omit<CameraZoom, 'id'>> }
   | { type: 'REMOVE_ZOOM'; zoomId: string }
+  | { type: 'ADD_MARKER'; marker: Marker }
+  | { type: 'UPDATE_MARKER'; markerId: string; updates: Partial<Omit<Marker, 'id'>> }
+  | { type: 'UPDATE_MARKER_TRANSIENT'; markerId: string; updates: Partial<Omit<Marker, 'id'>> }
+  | { type: 'REMOVE_MARKER'; markerId: string }
+  | { type: 'CLEAR_MARKERS' }
   | { type: 'UNDO' }
   | { type: 'REDO' }
 
@@ -270,6 +293,17 @@ export function createCameraZoom(options?: Partial<Omit<CameraZoom, 'id'>>): Cam
     hold: options?.hold ?? 2,
     transitionOut: options?.transitionOut ?? 0.6,
     easing: options?.easing ?? 'easeInOutCubic',
+  }
+}
+
+// A freshly-created marker at the given time (defaults to 0). label/color left unset so the
+// timeline uses its default MARKER_COLOR and shows just the flag until the user labels it.
+export function createMarker(options?: Partial<Omit<Marker, 'id'>>): Marker {
+  return {
+    id: crypto.randomUUID(),
+    time: options?.time ?? 0,
+    ...(options?.label !== undefined && { label: options.label }),
+    ...(options?.color !== undefined && { color: options.color }),
   }
 }
 

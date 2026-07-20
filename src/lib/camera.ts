@@ -1,7 +1,7 @@
 import type { CameraState, CameraZoom, CameraKeyframe, EasingKind } from '../types'
 import { IDENTITY_CAMERA } from '../types'
 import { ease, lerp } from './easing'
-import { KF_EPS, DEFAULT_EASING } from './keyframes'
+import { KF_EPS, seedLeadIn, seedEasing } from './keyframes'
 
 /**
  * Camera resolver (spec 13).
@@ -173,10 +173,10 @@ export function zoomPoseAt(zoom: CameraZoom, t: number): CameraState {
   const base = basePose(zoom)
   if (!kfs || kfs.length === 0) return base
 
-  const wps: { time: number; pose: CameraState; easing: EasingKind }[] =
+  const wps: { time: number; pose: CameraState; easing: EasingKind; leadIn?: number }[] =
     kfs[0].time <= KF_EPS
-      ? kfs.map((k) => ({ time: k.time, pose: k.pose, easing: k.easing }))
-      : [{ time: 0, pose: base, easing: 'linear' as EasingKind }, ...kfs.map((k) => ({ time: k.time, pose: k.pose, easing: k.easing }))]
+      ? kfs.map((k) => ({ time: k.time, pose: k.pose, easing: k.easing, leadIn: k.leadIn }))
+      : [{ time: 0, pose: base, easing: 'linear' as EasingKind }, ...kfs.map((k) => ({ time: k.time, pose: k.pose, easing: k.easing, leadIn: k.leadIn }))]
 
   if (t <= wps[0].time) return wps[0].pose
   const last = wps[wps.length - 1]
@@ -185,8 +185,11 @@ export function zoomPoseAt(zoom: CameraZoom, t: number): CameraState {
     const a = wps[i]
     const b = wps[i + 1]
     if (t >= a.time && t <= b.time) {
-      const span = b.time - a.time
-      const u = span > 0 ? (t - a.time) / span : 0
+      // Lead-in (spec 21): move into b occupies only [animStart, b.time]; hold a before it.
+      const animStart = b.leadIn == null ? a.time : Math.max(a.time, b.time - b.leadIn)
+      if (t < animStart) return a.pose
+      const span = b.time - animStart
+      const u = span > 1e-9 ? (t - animStart) / span : 1
       return lerpCamera(a.pose, b.pose, ease(b.easing, u)) // easing of the arriving keyframe
     }
   }
@@ -230,8 +233,9 @@ export function editZoomPose(zoom: CameraZoom, overrides: Partial<CameraState>, 
       return { keyframes: kfs.map((k, j) => (j === idx ? { ...k, pose } : k)) }
     }
     if (t > KF_EPS) {
+      const time = Math.max(0, t)
       const pose = { ...zoomPoseAt(zoom, t), ...overrides }
-      const next = [...kfs, { time: Math.max(0, t), pose, easing: DEFAULT_EASING }]
+      const next = [...kfs, { time, pose, easing: seedEasing(kfs, time), leadIn: seedLeadIn(kfs, time) }]
       next.sort((a, b) => a.time - b.time)
       return { keyframes: next }
     }
@@ -250,8 +254,8 @@ export function addZoomKeyframeAt(zoom: CameraZoom, t: number): CameraKeyframe[]
   const pose = zoomPoseAt(zoom, time)
   const kfs = zoom.keyframes ? [...zoom.keyframes] : []
   const idx = kfs.findIndex((k) => Math.abs(k.time - time) < KF_EPS)
-  if (idx >= 0) kfs[idx] = { ...kfs[idx], pose }
-  else kfs.push({ time, pose, easing: DEFAULT_EASING })
+  if (idx >= 0) kfs[idx] = { ...kfs[idx], pose } // update in place → leave leadIn untouched
+  else kfs.push({ time, pose, easing: seedEasing(kfs, time), leadIn: seedLeadIn(kfs, time) })
   kfs.sort((a, b) => a.time - b.time)
   return kfs
 }

@@ -1,10 +1,10 @@
-import { useRef } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type {
   TimelineObject, EasingKind, Transition, TransitionKind, SlideDirection, Keyframe,
   CameraZoom, CameraKeyframe, TextEffect, TextEffectKind,
 } from '../types'
 import { keyframeColor, defaultTransitionEasing } from '../lib/keyframes'
-import { clamp01 } from '../lib/easing'
+import { clamp01, ease } from '../lib/easing'
 
 /**
  * Shared property-editing UI (spec 17 P). Extracted from `PropertiesPanel` so the redesigned
@@ -12,24 +12,155 @@ import { clamp01 } from '../lib/easing'
  * source of truth for sections, fields, transition editors, and the keyframe/type-on bars.
  */
 
+// Spec 21: 7 maximally-distinct presets (was 9 near-duplicate curves). `instant` is a hard-cut.
 export const EASINGS: EasingKind[] = [
+  'instant',
   'linear',
-  'easeInQuad', 'easeOutQuad', 'easeInOutQuad',
-  'easeInCubic', 'easeOutCubic', 'easeInOutCubic',
-  'easeOutBack', 'spring',
+  'easeInCubic',
+  'easeOutCubic',
+  'easeInOutCubic',
+  'easeOutBack',
+  'spring',
 ]
 export const EASING_LABELS: Record<EasingKind, string> = {
-  linear: 'Even pace throughout',
-  easeInQuad: 'Starts slow (gentle)',
-  easeOutQuad: 'Eases to a stop (gentle)',
-  easeInOutQuad: 'Slow at both ends (gentle)',
-  easeInCubic: 'Starts slow, speeds up',
-  easeOutCubic: 'Fast, then eases to a stop',
+  instant: 'Instant — no animation',
+  linear: 'Even — steady speed',
+  easeInCubic: 'Slow start, fast finish',
+  easeOutCubic: 'Fast start, slow finish',
   easeInOutCubic: 'Smooth — slow at both ends',
-  easeOutBack: 'Overshoots, then settles',
-  spring: 'Bouncy — springs into place',
+  easeOutBack: 'Overshoot, then settle',
+  spring: 'Bouncy — springs in',
 }
 export const SELECT_CLS = 'bg-surface-muted text-fg text-xs px-2 py-1 rounded border border-border focus:border-accent outline-none cursor-pointer'
+
+/**
+ * Live preview of an easing curve (spec 21): a static SVG glyph of `ease(kind, x)` over 0→1 plus a
+ * dot travelling on a self-contained ~1.2s rAF loop, so the felt motion (accelerate / overshoot /
+ * bounce / snap) confirms the current selection. UI-only — never touches renderFrame.
+ *
+ * The rAF is its own loop (NOT driven by globalTime), so it stays cheap even though the panel
+ * re-renders at 60Hz during playback (see Gotchas). Overshoot (back/spring) is normalised into the
+ * padded viewbox so the bounce is actually visible.
+ */
+export function MotionPreview({ kind, color }: { kind: EasingKind; color?: string }) {
+  const W = 120, H = 34, PAD = 5
+  // Sample the curve once per kind; find its value range (may overshoot 0..1) to normalise the plot.
+  const { path, lo, hi } = useMemo(() => {
+    const N = 40
+    const ys: number[] = []
+    for (let i = 0; i <= N; i++) ys.push(ease(kind, i / N))
+    const lo = Math.min(0, ...ys)
+    const hi = Math.max(1, ...ys)
+    const span = hi - lo || 1
+    const px = (i: number) => PAD + (i / N) * (W - 2 * PAD)
+    const py = (v: number) => H - PAD - ((v - lo) / span) * (H - 2 * PAD)
+    const path = ys.map((v, i) => `${i === 0 ? 'M' : 'L'}${px(i).toFixed(1)},${py(v).toFixed(1)}`).join(' ')
+    return { path, lo, hi }
+  }, [kind])
+
+  const [u, setU] = useState(0)
+  useEffect(() => {
+    let raf = 0
+    let start: number | null = null
+    const DUR = 1200, GAP = 350
+    const loop = (ts: number) => {
+      if (start == null) start = ts
+      const e = (ts - start) % (DUR + GAP)
+      setU(e < DUR ? e / DUR : 1)
+      raf = requestAnimationFrame(loop)
+    }
+    raf = requestAnimationFrame(loop)
+    return () => cancelAnimationFrame(raf)
+  }, [])
+
+  const span = (hi - lo) || 1
+  const eased = ease(kind, u)
+  const dotX = PAD + clamp01(u) * (W - 2 * PAD)
+  const dotY = H - PAD - ((eased - lo) / span) * (H - 2 * PAD)
+  const c = color ?? 'var(--accent)'
+  return (
+    <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" className="mt-1 block rounded bg-surface-muted/60">
+      {/* baseline + top guide */}
+      <line x1={PAD} y1={H - PAD} x2={W - PAD} y2={H - PAD} stroke="var(--border)" strokeWidth={0.75} />
+      <path d={path} fill="none" stroke={c} strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
+      <circle cx={dotX} cy={dotY} r={2.75} fill={c} />
+    </svg>
+  )
+}
+
+/**
+ * Motion field (spec 21): a native `<select>` of the 7 presets + a `MotionPreview` of the selection.
+ * Native select keeps it accessible/keyboard-native; the single preview reflects the current pick
+ * (options can't host previews). `exclude` drops presets (transitions exclude `instant`). Replaces
+ * every raw easing `<select>` so there's one motion vocabulary everywhere.
+ */
+export function MotionPicker({
+  value, onChange, exclude, color,
+}: {
+  value: EasingKind
+  onChange: (k: EasingKind) => void
+  exclude?: EasingKind[]
+  color?: string
+}) {
+  const opts = exclude?.length ? EASINGS.filter((k) => !exclude.includes(k)) : EASINGS
+  return (
+    <div>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value as EasingKind)}
+        className="w-full bg-surface-muted text-fg text-[11px] px-1 py-1 rounded border outline-none cursor-pointer focus:border-accent"
+        style={{ borderColor: color ?? 'var(--border)' }}
+      >
+        {opts.map((k) => <option key={k} value={k}>{EASING_LABELS[k]}</option>)}
+      </select>
+      <MotionPreview kind={value} color={color} />
+    </div>
+  )
+}
+
+/**
+ * "Animate over" control (spec 21): a range slider that edits a keyframe's `leadIn` — how long the
+ * arriving move takes, ending at the keyframe. The rest of the gap holds the previous pose. Modeled
+ * on the transition Duration slider. `value` undefined ⇒ shows/edits as the full gap (fill-the-gap).
+ */
+export function LeadInField({
+  value, gap, color, onChange,
+}: {
+  value: number | undefined
+  gap: number
+  color?: string
+  onChange: (v: number) => void
+}) {
+  const max = Math.max(0, gap)
+  const eff = Math.min(value ?? max, max) // undefined (legacy) reads as "fills the gap"
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-1">
+        <label className="text-muted text-xs">Animate over</label>
+        <span className="text-[10px] text-subtle tabular-nums">
+          {eff <= 0.001 ? 'snap' : eff >= max - 0.001 ? `${eff.toFixed(2)}s (fills gap)` : `${eff.toFixed(2)}s of ${max.toFixed(2)}s`}
+        </span>
+      </div>
+      <input
+        type="range"
+        min={0}
+        max={max || 0.01}
+        step={0.05}
+        value={eff}
+        onChange={(e) => onChange(Number(e.target.value))}
+        className="w-full"
+        title="Holds the previous pose, then moves in over this many seconds, arriving at the keyframe"
+      />
+      {/* Fill from the right: the last `leadIn` seconds of the gap are the moving part; the rest holds. */}
+      <div className="relative h-2 w-full rounded bg-border overflow-hidden mt-1" title="Hold, then move (filled)">
+        <div
+          className="absolute top-0 right-0 h-full"
+          style={{ width: `${max > 0 ? Math.min(100, (eff / max) * 100) : 0}%`, background: color ?? 'var(--accent)', opacity: 0.7 }}
+        />
+      </div>
+    </div>
+  )
+}
 
 export function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -148,13 +279,8 @@ export function TransitionFields({
           )}
           <div>
             <label className="text-muted text-xs block mb-1">Motion</label>
-            <select
-              value={effEasing}
-              onChange={(e) => patch({ easing: e.target.value as EasingKind })}
-              className="w-full bg-surface-muted text-fg text-[11px] px-1 py-1 rounded border border-border focus:border-accent outline-none cursor-pointer"
-            >
-              {EASINGS.map((k) => <option key={k} value={k}>{EASING_LABELS[k]}</option>)}
-            </select>
+            {/* Transitions own their own duration → no lead-in; `instant` is just "None" here (R12/Q6). */}
+            <MotionPicker value={effEasing} onChange={(k) => patch({ easing: k })} exclude={['instant']} />
           </div>
           <div>
             <div className="flex items-center justify-between mb-1">

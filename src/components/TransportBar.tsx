@@ -1,4 +1,4 @@
-import { IconPlayerPlayFilled, IconPlayerPauseFilled } from '@tabler/icons-react'
+import { IconPlayerPlayFilled, IconPlayerPauseFilled, IconFlag, IconTrash } from '@tabler/icons-react'
 import VolumeControl from './VolumeControl'
 
 type TransportBarProps = {
@@ -12,6 +12,10 @@ type TransportBarProps = {
   isMuted: boolean
   onVolume: (v: number) => void
   onToggleMute: () => void
+  // Markers (spec 22): add at the playhead / clear all. markerCount gates the clear-all button.
+  onAddMarker: () => void
+  onClearMarkers: () => void
+  markerCount: number
 }
 
 /** m:ss.s clock — mirrors the timeline ruler's format. */
@@ -30,6 +34,7 @@ function formatClock(t: number): string {
 export default function TransportBar({
   isPlaying, onTogglePlayback, globalTime, totalDuration,
   playbackSpeed, onSetSpeed, volume, isMuted, onVolume, onToggleMute,
+  onAddMarker, onClearMarkers, markerCount,
 }: TransportBarProps) {
   return (
     <div className="pointer-events-auto flex items-center gap-3 px-2.5 py-1.5 bg-surface/95 border border-border rounded-full shadow-lg backdrop-blur-sm">
@@ -62,6 +67,28 @@ export default function TransportBar({
           className="w-20 accent-accent cursor-pointer"
         />
         <span className="text-xs text-muted tabular-nums w-8 text-right">{playbackSpeed}×</span>
+      </div>
+
+      <span className="w-px h-5 bg-border shrink-0" />
+
+      {/* Markers (spec 22): flag drops a marker at the playhead (also M); trash clears them all. */}
+      <div className="flex items-center gap-0.5 shrink-0">
+        <button
+          onClick={onAddMarker}
+          title="Add marker at playhead (M)"
+          className="flex items-center justify-center w-7 h-7 rounded-full text-muted hover:text-fg hover:bg-surface-hover cursor-pointer transition-colors"
+        >
+          <IconFlag size={15} stroke={2} />
+        </button>
+        {markerCount > 0 && (
+          <button
+            onClick={onClearMarkers}
+            title={`Clear all markers (${markerCount})`}
+            className="flex items-center justify-center w-7 h-7 rounded-full text-muted hover:text-danger hover:bg-danger-soft cursor-pointer transition-colors"
+          >
+            <IconTrash size={14} stroke={2} />
+          </button>
+        )}
       </div>
 
       <span className="w-px h-5 bg-border shrink-0" />

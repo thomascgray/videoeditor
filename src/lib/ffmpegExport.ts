@@ -245,7 +245,7 @@ async function exportWithWebCodecs(
   // Photos live in imageCache keyed by assetId. Decoded video frames are written
   // into imageCache keyed by OBJECT id (B3: each clip decodes independently, so
   // two clips sharing one asset never collide on the same cache slot).
-  const imageCache = new Map<string, HTMLImageElement | HTMLVideoElement | VideoFrame>()
+  const imageCache = new Map<string, HTMLImageElement | HTMLVideoElement | VideoFrame | OffscreenCanvas>()
   const videoSources = new Map<string, VideoSource>() // keyed by object id
 
   for (const obj of objects) {

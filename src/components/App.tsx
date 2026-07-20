@@ -1,12 +1,12 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 import type { InteractionMode, TimelineObjectType, TimelineObject, ArrowData, FreehandData } from '../types'
-import { createTimelineObject, createCameraZoom } from '../types'
+import { createTimelineObject, createCameraZoom, createMarker } from '../types'
 import { getRememberedStyle, getRememberedData } from '../lib/objectDefaults'
 import { useProject } from '../hooks/useProject'
 import { usePlayback } from '../hooks/usePlayback'
 import { useAudioPlayback } from '../hooks/useAudioPlayback'
 import { useUiPrefs } from '../hooks/useUiPrefs'
-import { loadAssetsFromDB, clearAllAssets } from '../lib/assetStore'
+import { loadAssetsFromDB, clearAllAssets, getAssetBlob, generateWaveform } from '../lib/assetStore'
 import { exportProjectBrep, importProjectBrep } from '../lib/projectStorage'
 import { config } from '../config'
 import Canvas from './Canvas'
@@ -33,7 +33,7 @@ const maxTimelineHeight = () =>
   Math.max(MIN_TIMELINE_HEIGHT, window.innerHeight - HEADER_HEIGHT - MIN_RENDER_HEIGHT)
 const clampTimelineHeight = (h: number) =>
   Math.max(MIN_TIMELINE_HEIGHT, Math.min(maxTimelineHeight(), h))
-const defaultTimelineHeight = () => clampTimelineHeight(Math.round(window.innerHeight * 0.22))
+const defaultTimelineHeight = () => clampTimelineHeight(Math.round(window.innerHeight * 0.26))
 
 export default function App() {
   const { project, dispatch, canUndo, canRedo, undo, redo } = useProject()
@@ -226,9 +226,9 @@ export default function App() {
   }, [project.objects, dispatch])
 
   // Re-add an already-imported asset (spec 17 L) as a new object at the playhead — no re-import,
-  // reuses the existing assetId. Mirrors ImportModal's object creation (audio waveform is skipped
-  // here; the timeline bar just omits the waveform until a future polish regenerates it).
-  const handleAddExistingAsset = useCallback((assetId: string) => {
+  // reuses the existing assetId. Mirrors ImportModal's object creation, including regenerating the
+  // audio/video waveform from the cached blob so the timeline bar shows it like a fresh import.
+  const handleAddExistingAsset = useCallback(async (assetId: string) => {
     const asset = project.assets.find((a) => a.id === assetId)
     if (!asset) return
     const startTime = playback.globalTime
@@ -237,10 +237,16 @@ export default function App() {
     let obj: TimelineObject
     if (asset.type === 'image') {
       obj = createTimelineObject('photo', { assetId }, { startTime, duration: 5, x: 0, y: 0, width: 1, height: 1, name })
-    } else if (asset.type === 'audio') {
-      obj = createTimelineObject('audio', { assetId, volume: 1, originalDuration: dur, sourceIn: 0, sourceOut: dur }, { startTime, duration: dur, name })
     } else {
-      obj = createTimelineObject('video', { assetId, volume: 1, originalDuration: dur, sourceIn: 0, sourceOut: dur }, { startTime, duration: dur, x: 0, y: 0, width: 1, height: 1, name })
+      // Regenerate the waveform from the cached blob (silent/unsupported media falls through).
+      let waveform: number[] | undefined
+      const blob = getAssetBlob(assetId)
+      if (blob) {
+        try { waveform = await generateWaveform(blob) } catch { /* no audio track / decode failed */ }
+      }
+      obj = asset.type === 'audio'
+        ? createTimelineObject('audio', { assetId, volume: 1, originalDuration: dur, waveform, sourceIn: 0, sourceOut: dur }, { startTime, duration: dur, name })
+        : createTimelineObject('video', { assetId, volume: 1, originalDuration: dur, waveform, sourceIn: 0, sourceOut: dur }, { startTime, duration: dur, x: 0, y: 0, width: 1, height: 1, name })
     }
     addObjects([obj])
   }, [project.assets, playback.globalTime, addObjects])
@@ -310,6 +316,27 @@ export default function App() {
     setCameraView((v) => (v === 'frame' ? 'live' : 'frame'))
   }, [])
 
+  // Markers (spec 22). Add one at the playhead (works while playing — "tap to the beat"); step the
+  // playhead to the previous/next marker; clear them all. No selection state — markers are edited
+  // via a click-popover on their flag (in Timeline).
+  const handleAddMarker = useCallback(() => {
+    dispatch({ type: 'ADD_MARKER', marker: createMarker({ time: playback.globalTime }) })
+  }, [dispatch, playback.globalTime])
+
+  const handleStepMarker = useCallback((dir: 1 | -1) => {
+    const times = (project.markers ?? []).map((m) => m.time).sort((a, b) => a - b)
+    if (times.length === 0) return
+    const t = playback.globalTime
+    const target = dir === 1
+      ? times.find((x) => x > t + 1e-4)
+      : [...times].reverse().find((x) => x < t - 1e-4)
+    if (target !== undefined) playback.seek(target)
+  }, [project.markers, playback])
+
+  const handleClearMarkers = useCallback(() => {
+    dispatch({ type: 'CLEAR_MARKERS' })
+  }, [dispatch])
+
   // Finish arrow drawing: tighten bbox + switch to move mode
   const handleFinishArrow = useCallback(() => {
     if (selectedObjectId) {
@@ -340,6 +367,13 @@ export default function App() {
         playback.togglePlayback()
       } else if (e.key === 'v') {
         toggleCameraView()
+      } else if (e.key === 'm' || e.key === 'M') {
+        // Add a marker at the playhead (spec 22). Works while playing = tap-to-the-beat.
+        handleAddMarker()
+      } else if (e.key === ',') {
+        handleStepMarker(-1)
+      } else if (e.key === '.') {
+        handleStepMarker(1)
       } else if (e.key === 'h' || e.key === 'H') {
         // Toggle hidden on the selected object OR zoom (spec 14 R11; selection is mutually exclusive).
         if (selectedObject) {
@@ -401,7 +435,7 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [playback, interactionMode, selectedObject, selectedZoom, drawEnabled, dispatch, undo, redo, handleFinishArrow, toggleCameraView])
+  }, [playback, interactionMode, selectedObject, selectedZoom, drawEnabled, dispatch, undo, redo, handleFinishArrow, toggleCameraView, handleAddMarker, handleStepMarker])
 
   const handleSelectObject = useCallback((id: string | null) => {
     setSelectedObjectId(id)
@@ -525,6 +559,9 @@ export default function App() {
               isMuted={isMuted}
               onVolume={setVolume}
               onToggleMute={toggleMute}
+              onAddMarker={handleAddMarker}
+              onClearMarkers={handleClearMarkers}
+              markerCount={project.markers?.length ?? 0}
             />
           </div>
         </div>
@@ -572,6 +609,7 @@ export default function App() {
               zooms={project.zooms}
               selectedZoomId={selectedZoomId}
               onSelectZoom={handleSelectZoom}
+              markers={project.markers}
               onCollapse={() => setTimelineCollapsed(true)}
             />
           </div>

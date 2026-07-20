@@ -83,7 +83,7 @@ async function runExport(
   sendProgress(0)
 
   // --- Load photos as ImageBitmap (by assetId) + one decoder per video object ---
-  const imageCache = new Map<string, ImageBitmap | VideoFrame>()
+  const imageCache = new Map<string, ImageBitmap | VideoFrame | OffscreenCanvas>()
   const videoDecoders = new Map<string, VideoFrameSource>() // keyed by object id (B3)
 
   for (const obj of objects) {

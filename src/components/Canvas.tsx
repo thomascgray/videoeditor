@@ -20,7 +20,9 @@ type ViewportState = { scale: number; panX: number; panY: number }
 const IDENTITY_VIEWPORT: ViewportState = { scale: 1, panX: 0, panY: 0 }
 const MIN_ZOOM = 0.25
 const MAX_ZOOM = 4
-const WHEEL_ZOOM_FACTOR = 1.1
+// Wheel-zoom sensitivity: factor = exp(-deltaY_px * this). Proportional to actual scroll distance so
+// laptop trackpads (many tiny deltas) aren't unusably fast; a mouse notch (~100px) ≈ a ~13% step.
+const WHEEL_ZOOM_SENSITIVITY = 0.0012
 const BUTTON_ZOOM_FACTOR = 1.2
 
 // Clamp a pan offset (px, top-left origin) so the transformed canvas keeps covering the fit box
@@ -521,7 +523,9 @@ export default function Canvas({
       e.preventDefault()
       const fit = fitBoxRef.current?.getBoundingClientRect()
       if (!fit) return
-      zoomAt(e.deltaY > 0 ? 1 / WHEEL_ZOOM_FACTOR : WHEEL_ZOOM_FACTOR, e.clientX - fit.left, e.clientY - fit.top)
+      const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? el.clientHeight : 1
+      const factor = Math.min(1.25, Math.max(0.8, Math.exp(-e.deltaY * unit * WHEEL_ZOOM_SENSITIVITY)))
+      zoomAt(factor, e.clientX - fit.left, e.clientY - fit.top)
     }
     el.addEventListener('wheel', onWheel, { passive: false })
     return () => el.removeEventListener('wheel', onWheel)

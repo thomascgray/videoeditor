@@ -4,6 +4,7 @@ import {
   type Sample,
   type Track,
   type Movie,
+  type Matrix,
   MP4BoxBuffer,
 } from 'mp4box'
 
@@ -56,9 +57,21 @@ export class VideoFrameSource {
   fps: number = 0
   /** Total number of frames */
   frameCount: number = 0
-  /** Video dimensions */
+  /** Video dimensions (coded — i.e. before display rotation) */
   width: number = 0
   height: number = 0
+  /**
+   * Display rotation from the container's transform matrix (tkhd), one of
+   * 0/90/180/270. VideoDecoder emits raw CODED frames and ignores this matrix
+   * (unlike an <video> element, which honours it), so a phone clip recorded
+   * sideways decodes rotated. getFrameAtTime() bakes this rotation back in.
+   */
+  rotation: number = 0
+
+  // Reusable canvas for baking `rotation` into decoded frames (only allocated
+  // when rotation !== 0). Source-owned like `currentFrame`.
+  private orientCanvas: OffscreenCanvas | null = null
+  private orientCtx: OffscreenCanvasRenderingContext2D | null = null
 
   async init(blob: Blob): Promise<void> {
     // Phase 1: Demux — collect all encoded samples from the MP4
@@ -70,6 +83,7 @@ export class VideoFrameSource {
     this.frameCount = trackInfo.frameCount
     this.width = trackInfo.width
     this.height = trackInfo.height
+    this.rotation = trackInfo.rotation
 
     // Phase 2: Set up decoder
     this.decoder = new VideoDecoder({
@@ -167,16 +181,21 @@ export class VideoFrameSource {
   }
 
   /**
-   * Get the source frame whose interval covers `targetTimeSeconds`.
+   * Get the (orientation-corrected) source frame whose interval covers
+   * `targetTimeSeconds`.
    *
-   * SOURCE-OWNED lifecycle: the returned VideoFrame belongs to this source and
+   * SOURCE-OWNED lifecycle: the returned drawable belongs to this source and
    * stays valid until the next getFrameAtTime() call or destroy(). The caller
    * may draw it but MUST NOT close it. Call with non-decreasing target times
    * (sequential export). The current frame is retained and re-served when
    * consecutive targets fall within it (output fps > source fps, or clips
    * rate-stretched slow); overshoot frames are retained, never dropped.
+   *
+   * When the container declares a display rotation, the raw decoded VideoFrame
+   * is baked into a rotated OffscreenCanvas (see `orient`) so the caller draws
+   * it upright — matching how the preview's <video> element renders it.
    */
-  async getFrameAtTime(targetTimeSeconds: number): Promise<VideoFrame | null> {
+  async getFrameAtTime(targetTimeSeconds: number): Promise<VideoFrame | OffscreenCanvas | null> {
     if (this.error) throw this.error
     const targetUs = targetTimeSeconds * 1_000_000
 
@@ -198,7 +217,42 @@ export class VideoFrameSource {
       this.currentFrame = next
     }
 
-    return this.currentFrame
+    return this.orient(this.currentFrame)
+  }
+
+  /**
+   * Bake `this.rotation` into a decoded frame. Returns the frame unchanged when
+   * there's no rotation (bit-identical to the pre-rotation path) or when
+   * OffscreenCanvas is unavailable; otherwise draws it rotated into a reused,
+   * source-owned canvas whose dimensions are the DISPLAY (post-rotation) size.
+   */
+  private orient(frame: VideoFrame): VideoFrame | OffscreenCanvas {
+    if (this.rotation === 0 || typeof OffscreenCanvas === 'undefined') return frame
+
+    const cw = frame.displayWidth
+    const ch = frame.displayHeight
+    const swap = this.rotation === 90 || this.rotation === 270
+    const dw = swap ? ch : cw
+    const dh = swap ? cw : ch
+
+    if (!this.orientCanvas) {
+      this.orientCanvas = new OffscreenCanvas(dw, dh)
+      this.orientCtx = this.orientCanvas.getContext('2d')
+    }
+    const canvas = this.orientCanvas
+    const octx = this.orientCtx
+    if (!octx) return frame // 2D context unavailable — fall back to raw frame
+    if (canvas.width !== dw) canvas.width = dw
+    if (canvas.height !== dh) canvas.height = dh
+
+    // Rotate about the canvas centre; a 90/180/270 rotation of a cw×ch frame
+    // exactly fills the dw×dh (swapped) canvas, so no separate clear is needed.
+    octx.setTransform(1, 0, 0, 1, 0, 0)
+    octx.translate(dw / 2, dh / 2)
+    octx.rotate((this.rotation * Math.PI) / 180)
+    octx.drawImage(frame, -cw / 2, -ch / 2, cw, ch)
+
+    return canvas
   }
 
   /** End of a frame's presentation interval, in µs (falls back to nominal fps). */
@@ -245,7 +299,23 @@ type DemuxResult = {
     frameCount: number
     width: number
     height: number
+    rotation: number
   }
+}
+
+/**
+ * Derive display rotation (0/90/180/270°) from an ISO-BMFF transform matrix.
+ * The matrix is stored row-major as [a b u c d v x y w]; the image's x-axis
+ * (1,0) maps to (a,b), so the rotation angle is atan2(b, a). Values are
+ * fixed-point but atan2 is scale-invariant, so raw ints work. Non-90° shears
+ * (rare) snap to the nearest quarter-turn.
+ */
+function rotationFromMatrix(matrix: Matrix | undefined): number {
+  if (!matrix || matrix.length < 2) return 0
+  const a = matrix[0]
+  const b = matrix[1]
+  const deg = (Math.atan2(b, a) * 180) / Math.PI
+  return (((Math.round(deg / 90) * 90) % 360) + 360) % 360
 }
 
 /**
@@ -327,6 +397,7 @@ async function demuxMP4(blob: Blob): Promise<DemuxResult> {
         frameCount,
         width: track.video?.width ?? 0,
         height: track.video?.height ?? 0,
+        rotation: rotationFromMatrix(track.matrix),
       },
     })
   })

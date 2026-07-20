@@ -26,7 +26,7 @@ export function renderFrame(
   objects: TimelineObject[],
   globalTime: number,
   options: { width: number; height: number },
-  imageCache: Map<string, HTMLImageElement | HTMLVideoElement | ImageBitmap | VideoFrame>,
+  imageCache: Map<string, HTMLImageElement | HTMLVideoElement | ImageBitmap | VideoFrame | OffscreenCanvas>,
   editorOptions?: EditorOptions,
 ) {
   const { width: w, height: h } = options
@@ -92,7 +92,7 @@ function drawObject(
   progress: number,
   w: number,
   h: number,
-  imageCache: Map<string, HTMLImageElement | HTMLVideoElement | ImageBitmap | VideoFrame>,
+  imageCache: Map<string, HTMLImageElement | HTMLVideoElement | ImageBitmap | VideoFrame | OffscreenCanvas>,
   time: number,   // clip-relative seconds (globalTime - startTime); only drawText uses it (spec 19)
   styleOverride?: ObjectStyle,
 ) {
@@ -168,7 +168,7 @@ function drawObject(
  */
 function drawImageCover(
   ctx: CanvasRenderingContext2D,
-  img: HTMLImageElement | HTMLVideoElement | ImageBitmap | VideoFrame,
+  img: HTMLImageElement | HTMLVideoElement | ImageBitmap | VideoFrame | OffscreenCanvas,
   dx: number,
   dy: number,
   dw: number,

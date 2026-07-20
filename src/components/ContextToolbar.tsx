@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import type { TimelineObject, ProjectAction, ArrowData, TextData, VideoData, TextAlign, CameraZoom, EasingKind } from '../types'
+import type { TimelineObject, ProjectAction, ArrowData, TextData, VideoData, TextAlign, CameraZoom } from '../types'
 import { effVal as kfEffVal, editPose } from '../lib/keyframes'
 import { zoomHoldTime, zoomTargetPoseAt, editZoomPose } from '../lib/camera'
 import { clamp01 } from '../lib/easing'
@@ -11,7 +11,7 @@ import {
   IconFocusCentered, IconClock,
 } from '@tabler/icons-react'
 import { Popover } from './Popover'
-import { Field, NumberInput, TransitionSection, SELECT_CLS, EASINGS, EASING_LABELS } from './propertyControls'
+import { Field, NumberInput, TransitionSection, SELECT_CLS, MotionPicker } from './propertyControls'
 
 /**
  * Floating context toolbar (spec 17 P) — the fast-path property surface anchored over the selected
@@ -140,13 +140,7 @@ export function ZoomContextToolbar({
           </Field>
           <div>
             <label className="mb-1 block text-xs text-muted">Motion</label>
-            <select
-              value={zoom.easing}
-              onChange={(e) => update({ easing: e.target.value as EasingKind })}
-              className="w-full cursor-pointer rounded border border-border bg-surface-muted px-1 py-1 text-[11px] text-fg outline-none focus:border-accent"
-            >
-              {EASINGS.map((k) => <option key={k} value={k}>{EASING_LABELS[k]}</option>)}
-            </select>
+            <MotionPicker value={zoom.easing} onChange={(k) => update({ easing: k })} />
           </div>
         </div>
       </Popover>

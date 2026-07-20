@@ -128,6 +128,20 @@ function projectReducer(state: UndoableState, action: ProjectAction): UndoableSt
     }
   }
 
+  if (action.type === 'UPDATE_MARKER_TRANSIENT') {
+    const newProject = applyAction(state.present, {
+      type: 'UPDATE_MARKER',
+      markerId: action.markerId,
+      updates: action.updates,
+    })
+    if (newProject === state.present) return state
+    return {
+      ...state,
+      present: newProject,
+      transientSnapshot: state.transientSnapshot ?? state.present,
+    }
+  }
+
   if (action.type === 'COMMIT_TRANSIENT') {
     if (!state.transientSnapshot) return state
     return {
@@ -183,6 +197,24 @@ function applyAction(project: Project, action: ProjectAction): Project {
 
     case 'REMOVE_ZOOM':
       return { ...project, zooms: (project.zooms ?? []).filter((z) => z.id !== action.zoomId) }
+
+    case 'ADD_MARKER':
+      return { ...project, markers: [...(project.markers ?? []), action.marker] }
+
+    case 'UPDATE_MARKER':
+      return {
+        ...project,
+        markers: (project.markers ?? []).map((m) =>
+          m.id === action.markerId ? { ...m, ...action.updates } : m,
+        ),
+      }
+
+    case 'REMOVE_MARKER':
+      return { ...project, markers: (project.markers ?? []).filter((m) => m.id !== action.markerId) }
+
+    case 'CLEAR_MARKERS':
+      if (!project.markers || project.markers.length === 0) return project
+      return { ...project, markers: [] }
 
     case 'UPDATE_OBJECT':
       return {
