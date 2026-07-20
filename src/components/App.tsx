@@ -36,7 +36,7 @@ const clampTimelineHeight = (h: number) =>
 const defaultTimelineHeight = () => clampTimelineHeight(Math.round(window.innerHeight * 0.26))
 
 export default function App() {
-  const { project, dispatch, canUndo, canRedo, undo, redo } = useProject()
+  const { project, dispatch, canUndo, canRedo, undo, redo, isDirty, markSaved } = useProject()
   const playback = usePlayback(project)
   const uiPrefs = useUiPrefs()
 
@@ -195,7 +195,8 @@ export default function App() {
 
   const handleExportProject = useCallback(async () => {
     await exportProjectBrep(project)
-  }, [project])
+    markSaved() // the .brep file now matches the in-memory project → clear the unsaved-changes guard
+  }, [project, markSaved])
 
   const handleImportProject = useCallback(async (file: File) => {
     try {
@@ -206,6 +207,26 @@ export default function App() {
       alert('Failed to import project file.')
     }
   }, [dispatch])
+
+  // Loading a .brep replaces the whole project, discarding any unsaved edits — confirm first.
+  const handleLoadClick = useCallback(() => {
+    if (isDirty && !window.confirm('You have unsaved changes that will be lost. Load a different project anyway?')) {
+      return
+    }
+    projectFileRef.current?.click()
+  }, [isDirty])
+
+  // Warn before closing/refreshing the tab with unsaved changes (native browser dialog — a custom
+  // modal can't be shown during beforeunload). Only attach the listener while actually dirty.
+  useEffect(() => {
+    if (!isDirty) return
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault()
+      e.returnValue = '' // some browsers require returnValue to be set to trigger the prompt
+    }
+    window.addEventListener('beforeunload', handler)
+    return () => window.removeEventListener('beforeunload', handler)
+  }, [isDirty])
 
   // Central helper: assigns each object to a new lane above all existing objects,
   // dispatches, and selects the newly-added object (the last one when adding several)
@@ -464,7 +485,7 @@ export default function App() {
             <IconDeviceFloppy size={14} stroke={2} /> Save
           </button>
           <button
-            onClick={() => projectFileRef.current?.click()}
+            onClick={handleLoadClick}
             className="flex items-center gap-1 px-2 py-1 text-xs text-muted hover:text-fg bg-surface-muted hover:bg-surface-hover rounded transition-colors cursor-pointer"
             title="Load project from .brep"
           >

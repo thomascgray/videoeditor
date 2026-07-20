@@ -75,9 +75,16 @@ type UndoableState = {
   future: Project[]
   /** Snapshot saved on first transient update, used for undo entry on commit */
   transientSnapshot: Project | null
+  /** True when `present` differs from the last saved/loaded project (drives the leave-without-saving guard) */
+  dirty: boolean
 }
 
 function projectReducer(state: UndoableState, action: ProjectAction): UndoableState {
+  // Clears the unsaved-changes flag after a .brep export — no history mutation.
+  if (action.type === 'MARK_SAVED') {
+    return state.dirty ? { ...state, dirty: false } : state
+  }
+
   if (action.type === 'UNDO') {
     if (state.past.length === 0) return state
     const previous = state.past[state.past.length - 1]
@@ -86,6 +93,7 @@ function projectReducer(state: UndoableState, action: ProjectAction): UndoableSt
       present: previous,
       future: [state.present, ...state.future],
       transientSnapshot: null,
+      dirty: true,
     }
   }
 
@@ -97,6 +105,7 @@ function projectReducer(state: UndoableState, action: ProjectAction): UndoableSt
       present: next,
       future: state.future.slice(1),
       transientSnapshot: null,
+      dirty: true,
     }
   }
 
@@ -111,6 +120,7 @@ function projectReducer(state: UndoableState, action: ProjectAction): UndoableSt
       ...state,
       present: newProject,
       transientSnapshot: state.transientSnapshot ?? state.present,
+      dirty: true,
     }
   }
 
@@ -125,6 +135,7 @@ function projectReducer(state: UndoableState, action: ProjectAction): UndoableSt
       ...state,
       present: newProject,
       transientSnapshot: state.transientSnapshot ?? state.present,
+      dirty: true,
     }
   }
 
@@ -139,6 +150,7 @@ function projectReducer(state: UndoableState, action: ProjectAction): UndoableSt
       ...state,
       present: newProject,
       transientSnapshot: state.transientSnapshot ?? state.present,
+      dirty: true,
     }
   }
 
@@ -149,6 +161,7 @@ function projectReducer(state: UndoableState, action: ProjectAction): UndoableSt
       present: state.present,
       future: [],
       transientSnapshot: null,
+      dirty: true,
     }
   }
 
@@ -160,6 +173,9 @@ function projectReducer(state: UndoableState, action: ProjectAction): UndoableSt
     present: newProject,
     future: [],
     transientSnapshot: null,
+    // Loading/replacing the whole project (SET_PROJECT) lands on a state that matches the file
+    // on disk, so it starts clean; every other mutation dirties the project.
+    dirty: action.type !== 'SET_PROJECT',
   }
 }
 
@@ -287,6 +303,7 @@ export function useProject() {
     present: config.persistProject ? loadProject() : createDefaultProject(loadCanvasSize() ?? undefined),
     future: [],
     transientSnapshot: null,
+    dirty: false,
   }))
 
   // Auto-save (debounced) — only when persistence is enabled
@@ -311,6 +328,7 @@ export function useProject() {
 
   const undo = useCallback(() => dispatch({ type: 'UNDO' }), [])
   const redo = useCallback(() => dispatch({ type: 'REDO' }), [])
+  const markSaved = useCallback(() => dispatch({ type: 'MARK_SAVED' }), [])
 
   return {
     project: state.present,
@@ -319,5 +337,7 @@ export function useProject() {
     canRedo,
     undo,
     redo,
+    isDirty: state.dirty,
+    markSaved,
   }
 }

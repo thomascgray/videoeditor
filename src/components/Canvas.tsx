@@ -1590,7 +1590,7 @@ export default function Canvas({
 
         {/* Editor viewport zoom controls (spec 16 D). Editor-only magnification — never exported.
             Wheel over the canvas zooms to the cursor; middle-drag pans. 100% = fit-to-window. */}
-        <div className="absolute bottom-2 right-2 flex items-center bg-surface-muted/90 rounded shadow text-xs text-fg select-none">
+        <div className="absolute top-2 left-2 flex items-center bg-surface-muted/90 rounded shadow text-xs text-fg select-none">
           <button onClick={() => zoomAt(1 / BUTTON_ZOOM_FACTOR)} className="px-2 py-1 inline-flex items-center hover:bg-surface-hover rounded-l cursor-pointer" title="Zoom out"><IconMinus size={14} stroke={2} /></button>
           <button onClick={resetViewport} className="px-1.5 py-1 min-w-[3.25rem] text-center tabular-nums hover:bg-surface-hover cursor-pointer" title="Reset to Fit (100%)">{zoomPct}%</button>
           <button onClick={() => zoomAt(BUTTON_ZOOM_FACTOR)} className="px-2 py-1 inline-flex items-center hover:bg-surface-hover cursor-pointer" title="Zoom in"><IconPlus size={14} stroke={2} /></button>
